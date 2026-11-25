@@ -1,0 +1,39 @@
+# ── 依赖 ─────────────────────────────
+node_modules/
+.pnpm-store/
+.yarn/cache/
+
+# ── 构建产物 ──────────────────────────
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# ── 环境变量与密钥（登录凭据、AI API Key、对象存储密钥）──
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── 运行时产物 ────────────────────────
+*.log
+logs/
+tmp/
+.cache/
+coverage/
+
+# ── 本地验证产物（抓取实测的样本页、快照等，不进版本库）──
+.local/
+samples/
+
+# ── 编辑器 / 操作系统 ──────────────────
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── WorkBuddy 会话记忆（个人上下文，不进版本库）──
+.workbuddy/
