@@ -1,0 +1,25 @@
+# ① 提交前检查：在自己电脑上跑，几秒内完事。
+# 不用远程 hook 仓库（这里访问 GitHub 不稳定），改成 local + PyPI 安装，
+# 版本固定在一个地方，和 pyproject.toml 里装的一致。
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: ruff check --fix --force-exclude
+        language: python
+        additional_dependencies: ["ruff==0.17.6"]
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format --force-exclude
+        language: python
+        additional_dependencies: ["ruff==0.17.6"]
+        types: [python]
+      # 规矩不写在文档里靠人记，写成这条钩子：暂存了文档就必须过检查
+      - id: doc-checks
+        name: 文档规则（只查暂存文档）
+        entry: python -m tools.doc_checks --staged
+        language: system
+        files: ^docs/.*\.md$
+        pass_filenames: false

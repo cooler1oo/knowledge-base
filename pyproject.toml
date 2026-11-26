@@ -1,0 +1,26 @@
+[project]
+name = "knowledge-base"
+version = "0.1.0"
+description = "个人知识库：需求、设计、技术方案，以及约束这些文档的自动检查"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.17", "pre-commit>=3.7"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["tools", "tools.doc_checks"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = ["slow: 慢检查，PR 上不跑，合进 main 之后跑"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
