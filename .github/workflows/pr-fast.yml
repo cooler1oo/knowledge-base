@@ -23,6 +23,10 @@ jobs:
         run: |
           ruff check .
           ruff format --check .
+      - name: 类型检查
+        run: mypy kb tools
+      - name: 架构边界（只有 store 能写库等）
+        run: python -m tools.eng_checks --arch
       - name: 文档规则（只查这次改动的文档）
         run: python -m tools.doc_checks --changed "origin/${{ github.base_ref }}"
       - name: 只跑和这次改动相关的测试

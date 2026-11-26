@@ -16,10 +16,40 @@ repos:
         language: python
         additional_dependencies: ["ruff==0.17.6"]
         types: [python]
+      - id: mypy
+        name: mypy 类型检查
+        entry: mypy kb tools
+        language: python
+        additional_dependencies: ["mypy==2.4.1"]
+        files: ^(kb|tools)/.*\.py$
+        pass_filenames: false
+      - id: arch-boundaries
+        name: 架构边界（只有 store 能写库等）
+        entry: python -m tools.eng_checks --arch
+        language: system
+        files: ^kb/.*\.py$
+        pass_filenames: false
+      - id: commit-size
+        name: 提交大小（防一次塞一坨）
+        entry: python -m tools.eng_checks --staged
+        language: system
+        pass_filenames: false
       # 规矩不写在文档里靠人记，写成这条钩子：暂存了文档就必须过检查
       - id: doc-checks
         name: 文档规则（只查暂存文档）
         entry: python -m tools.doc_checks --staged
         language: system
         files: ^docs/.*\.md$
+        pass_filenames: false
+      - id: commit-message
+        name: 提交信息（格式 + 正文 + 必须写验证）
+        entry: python -m tools.eng_checks --commit-msg
+        language: system
+        stages: [commit-msg]
+      - id: prepush-clean
+        name: 推送前工作区必须干净
+        entry: python -m tools.eng_checks --pre-push
+        language: system
+        stages: [pre-push]
+        always_run: true
         pass_filenames: false

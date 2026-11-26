@@ -43,7 +43,9 @@ class PgUnreachable(RuntimeError):
     ) -> None:
         self.errno = errno
         self.elapsed_ms = elapsed_ms
-        hint = _ERRNO_HINT.get(errno, "错误码未知")
+        hint = (
+            _ERRNO_HINT.get(errno, "错误码未知") if errno is not None else "错误码未知"
+        )
         super().__init__(
             f"{cfg.host}:{cfg.port} 连不上（耗时 {elapsed_ms:.0f}ms，"
             f"errno={errno}，{hint}）：{raw}"

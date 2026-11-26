@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 
 import uvicorn
+from starlette.applications import Starlette
 
 from kb.store.config import PgConfig
 from kb.store.db import Pool
@@ -16,7 +17,7 @@ from kb.store.db import Pool
 from .app import AppConfig, create_app
 
 
-def build(argv: list[str] | None = None) -> tuple[object, str, int]:
+def build(argv: list[str] | None = None) -> tuple[Starlette, str, int]:
     parser = argparse.ArgumentParser(prog="python -m kb.api")
     parser.add_argument("--host", default="127.0.0.1", help="默认只听本机")
     parser.add_argument("--port", type=int, default=8000)
