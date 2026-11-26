@@ -3,7 +3,7 @@ name = "knowledge-base"
 version = "0.1.0"
 description = "个人知识库：需求、设计、技术方案，以及约束这些文档的自动检查"
 requires-python = ">=3.10"
-dependencies = ["pg8000>=1.31"]
+dependencies = ["pg8000>=1.31", "starlette>=1.0", "uvicorn>=0.30", "bcrypt>=5.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.17", "pre-commit>=3.7"]
