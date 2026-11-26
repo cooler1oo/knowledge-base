@@ -23,4 +23,9 @@ jobs:
       - name: 文档规则（全量 + P0 覆盖 + 引用检查）
         run: python -m tools.doc_checks --all --cross-refs
       - name: 全部测试（含慢测试）
+        # 慢测试里的联网核对要查 GitHub 星数与许可。
+        # 用 secrets.GITHUB_TOKEN（Actions 自动提供，5000/小时）；
+        # 不传则走匿名 60/小时，容易打满后 skip。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pytest

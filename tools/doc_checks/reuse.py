@@ -67,6 +67,7 @@ LITE_DIRS = {"prd", "specs", "research"}
 
 PERMISSIVE = {
     "MIT",
+    "MIT-CMU",
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
@@ -484,9 +485,23 @@ class RemoteCheck:
         return self.claimed_license != self.actual_license
 
 
-# 支持用环境变量提供 token，把匿名 60 次/小时 提到 5000 次/小时。
-# CI 里配 GITHUB_TOKEN 即可；本地不配也能跑，只是容易打满配额。
-GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
+# 顺序很重要：本机实际使用的是 GITHUB_PERSONAL_ACCESS_TOKEN（实测 5000/小时），
+# 早先只认 GITHUB_TOKEN，导致一直走匿名 60/小时 的通道并被打满。
+TOKEN_ENVS = (
+    "GITHUB_PERSONAL_ACCESS_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+)
+
+
+def github_token() -> str | None:
+    for name in TOKEN_ENVS:
+        v = os.environ.get(name)
+        if v:
+            return v
+    return None
+
+
 # 限流与网络故障不等于「文档写错」，要能区分开，否则 CI 会被误报刷屏。
 TRANSIENT_ERRORS = ("HTTP 403", "HTTP 429", "URLError", "TimeoutError", "HTTP 5")
 
@@ -498,7 +513,7 @@ def fetch_repo(candidate: str, timeout: int = 15) -> tuple[int | None, str, str 
         "Accept": "application/vnd.github+json",
         "User-Agent": "kb-doc-checks",
     }
-    token = os.environ.get(GITHUB_TOKEN_ENV)
+    token = github_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, headers=headers)
@@ -575,10 +590,12 @@ def verify_remote(text: str, path: str, mode: str = "strict") -> list[Violation]
             )
 
     if checked == 0 and transient_hit:
-        raise RemoteUnavailable(
-            "GitHub API 不可用或已限流，无法核对；"
-            f"设置环境变量 {GITHUB_TOKEN_ENV} 可把配额从 60/小时提到 5000/小时"
+        hint = (
+            "已检测到 token，可能是 token 失效或权限不足"
+            if github_token()
+            else f"未检测到 token，设置 {' / '.join(TOKEN_ENVS)} 之一可把配额从 60/小时提到 5000/小时"
         )
+        raise RemoteUnavailable(f"GitHub API 不可用或已限流，无法核对；{hint}")
     return out
 
 

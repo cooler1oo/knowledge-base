@@ -125,7 +125,11 @@ demo/            可交互原型
 
 **跑在哪**：`python -m tools.doc_checks --all`，由 ① 提交前钩子、② PR、③ main 自动执行。
 
-**联网核对**（③ main 的慢检查）：`tests/test_reuse_remote_slow.py` 调 GitHub API 核对星数与许可，已抓到过真实错误（Meilisearch 许可被误写成 MIT，实为 `MIT AND BUSL-1.1`）。**限流/断网时跳过而非失败**——环境故障不等于文档写错。匿名配额 60 次/小时，配 `GITHUB_TOKEN` 提到 5000。
+**联网核对**（③ main 的慢检查）：`tests/test_reuse_remote_slow.py` 调 GitHub API 核对星数与许可，已抓到过真实错误（Meilisearch 许可被误写成 MIT，实为 `MIT AND BUSL-1.1`）。**限流/断网时跳过而非失败**——环境故障不等于文档写错。
+
+**配额**：匿名 60 次/小时，带 token 5000 次/小时。代码按 `GITHUB_PERSONAL_ACCESS_TOKEN` → `GH_TOKEN` → `GITHUB_TOKEN` 顺序读取。CI 已配 `secrets.GITHUB_TOKEN`。
+
+**许可核实要读原文**：GitHub 的 SPDX 字段对非标准许可返回 `NOASSERTION`（Pillow 的 MIT-CMU、Meilisearch 的复合许可都是），只看 API 会误判。
 
 **历史文档豁免**：规则上线前写的文档可加 `<!-- reuse-audit: exempt -->` 并在下一行写原因。豁免只免除「缺章节」，内容不合规照样报错。
 

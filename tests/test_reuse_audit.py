@@ -397,7 +397,9 @@ def test_transient_error_raises_remote_unavailable(monkeypatch) -> None:
     try:
         reuse.verify_remote(text, "x.md", "strict")
     except reuse.RemoteUnavailable as exc:
-        assert "GITHUB_TOKEN" in str(exc)
+        msg = str(exc)
+        # 要么提示「未检测到 token」，要么提示「token 失效」，两者都算交代清楚
+        assert "GITHUB_TOKEN" in msg or "token 失效" in msg
     else:
         raise AssertionError("限流时应抛 RemoteUnavailable")
 
