@@ -571,3 +571,26 @@ def test_design_coverage_reverse_injection_is_caught() -> None:
     assert any("zzz_injected" in x.message for x in v), f"没拦住，实际输出: {v}"
     # 另一条断言：已覆盖的 items 不得被误报
     assert not any("「items」" in x.message for x in v), f"误报已覆盖的表: {v}"
+
+
+def test_remote_disconnected_is_treated_as_transient(monkeypatch):
+    """连接被对端掐断属于环境问题，必须跳过而不是判文档有错。
+
+    2026-11-26 本地跑全量时踩到：proxy 掐断 GitHub API 连接，抛
+    http.client.RemoteDisconnected，旧代码只捕获 URLError，于是把环境故障
+    报成了测试失败。
+    """
+    import http.client
+
+    from tools.doc_checks import reuse
+
+    def _boom(*_args, **_kwargs):
+        raise http.client.RemoteDisconnected(
+            "Remote end closed connection without response"
+        )
+
+    monkeypatch.setattr(reuse.urllib.request, "urlopen", _boom)
+    stars, lic, err = reuse.fetch_repo("owner/repo")
+    assert stars is None and lic == ""
+    assert err == "RemoteDisconnected"
+    assert reuse.is_transient(err) is True

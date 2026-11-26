@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -572,7 +573,20 @@ def github_token() -> str | None:
 
 
 # 限流与网络故障不等于「文档写错」，要能区分开，否则 CI 会被误报刷屏。
-TRANSIENT_ERRORS = ("HTTP 403", "HTTP 429", "URLError", "TimeoutError", "HTTP 5")
+# 注意 RemoteDisconnected / IncompleteRead 属于 http.client，不是 URLError：
+# 2026-11-26 本地跑全量时就因为它没被收进来，把一个环境故障报成了测试失败。
+TRANSIENT_ERRORS = (
+    "HTTP 403",
+    "HTTP 429",
+    "URLError",
+    "TimeoutError",
+    "HTTP 5",
+    "RemoteDisconnected",
+    "ConnectionReset",
+    "ConnectionError",
+    "IncompleteRead",
+    "BadStatusLine",
+)
 
 
 def fetch_repo(candidate: str, timeout: int = 15) -> tuple[int | None, str, str | None]:
@@ -591,7 +605,9 @@ def fetch_repo(candidate: str, timeout: int = 15) -> tuple[int | None, str, str 
             data = json.load(resp)
     except urllib.error.HTTPError as e:
         return None, "", f"HTTP {e.code}"
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+    except (OSError, http.client.HTTPException, json.JSONDecodeError) as e:
+        # URLError 是 OSError 的子类，一并收；HTTPException 覆盖 RemoteDisconnected
+        # 这类「连接被对端掐断」的情况——它们都是环境问题，不是文档写错。
         return None, "", type(e).__name__
 
     stars = data.get("stargazers_count")
