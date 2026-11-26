@@ -476,6 +476,43 @@ def extract_design_anchors(text: str) -> list[tuple[int, str]]:
     return out
 
 
+def check_design_coverage(text: str, path: str) -> list[Violation]:
+    """建表语句必须有对应的复用调研行，否则说明该设计没做过候选对比。
+
+    只对 strict 目录（docs/tech）生效：research/prd 里出现的 DDL 多是引用
+    别人的 schema，不是本项目的设计决策。豁免文档整篇跳过。
+    """
+    if EXEMPT_MARK in text:
+        return []
+    if mode_for(path) != "strict":
+        return []
+
+    anchors = extract_design_anchors(text)
+    if not anchors:
+        return []
+
+    audit = parse_audit(text)
+    if not audit.found_section or not audit.rows:
+        # 缺章节/无数据行由 audit_text 单独报，这里不重复
+        return []
+
+    corpus = "\n".join(f"{r.component} {r.reason}" for r in audit.rows)
+    out: list[Violation] = []
+    for lineno, name in anchors:
+        if name in corpus:
+            continue
+        out.append(
+            Violation(
+                path,
+                lineno,
+                "设计覆盖",
+                f"建了表「{name}」但复用调研表没有任何一行提到它："
+                "该表的结构设计缺少候选对比（AGENTS.md 8.1）",
+            )
+        )
+    return out
+
+
 def check_file(p: Path, mode: str | None = None) -> list[Violation]:
     mode = mode or mode_for(p)
     if mode is None:

@@ -452,3 +452,61 @@ def test_extract_design_anchors_ignores_inline_code() -> None:
 
     text = "见 `CREATE TABLE items` 这一句。\n"
     assert extract_design_anchors(text) == []
+
+
+def _doc_with(ddl: str, rows: str) -> str:
+    return (
+        "## 复用调研\n\n"
+        "| 组件 | 候选 | 星数 | 许可 | 结论 | 运行环境 | 理由 |\n"
+        "|---|---|---|---|---|---|---|\n"
+        f"{rows}"
+        "\n\n## 数据模型\n\n"
+        "```sql\n"
+        f"{ddl}"
+        "```\n"
+    )
+
+
+def test_design_coverage_passes_when_table_mentioned() -> None:
+    """调研表的理由里提到了表名，视为已覆盖。"""
+    from tools.doc_checks.reuse import check_design_coverage
+
+    text = _doc_with(
+        "CREATE TABLE items (id bigserial);\n",
+        "| 内容模型 | karakeep-app/karakeep | 30862 | AGPL-3.0 | 参考 | Docker | "
+        "取其主表+分表结构，用于设计 items 表 |\n",
+    )
+    assert check_design_coverage(text, "docs/tech/x.md") == []
+
+
+def test_design_coverage_flags_unmentioned_table() -> None:
+    """建了表但调研表里完全没提到它 → 报违规。"""
+    from tools.doc_checks.reuse import check_design_coverage
+
+    text = _doc_with(
+        "CREATE TABLE items (id bigserial);\nCREATE TABLE wobbly (id int);\n",
+        "| 内容模型 | karakeep-app/karakeep | 30862 | AGPL-3.0 | 参考 | Docker | "
+        "取其主表+分表结构，用于设计 items 表 |\n",
+    )
+    v = check_design_coverage(text, "docs/tech/x.md")
+    assert len(v) == 1
+    assert "wobbly" in v[0].message
+    assert v[0].rule == "设计覆盖"
+
+
+def test_design_coverage_skips_exempt_document() -> None:
+    """带豁免标记的文档整篇跳过，历史文档不得因此变红。"""
+    from tools.doc_checks.reuse import check_design_coverage
+
+    text = "<!-- reuse-audit: exempt -->\n" + _doc_with(
+        "CREATE TABLE wobbly (id int);\n", ""
+    )
+    assert check_design_coverage(text, "docs/tech/old.md") == []
+
+
+def test_design_coverage_skips_non_strict_dir() -> None:
+    """research/ 里引用别人的 schema 不需要本项目调研表覆盖。"""
+    from tools.doc_checks.reuse import check_design_coverage
+
+    text = _doc_with("CREATE TABLE wobbly (id int);\n", "")
+    assert check_design_coverage(text, "docs/research/x.md") == []
