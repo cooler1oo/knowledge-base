@@ -138,8 +138,10 @@ def only_slow(p: Path) -> bool:
 def main() -> int:
     sys.stdout.reconfigure(line_buffering=True)
     base = sys.argv[1] if len(sys.argv) > 1 else default_base()
+    # -z：默认输出会把中文路径转成 "\351\252\214" 这种八进制转义，
+    # 后面按路径找文件会全部落空（表现为"没有相关测试"，实际是漏跑）。按 NUL 切。
     changed = [
-        f for f in git("diff", "--name-only", f"{base}...HEAD").splitlines() if f
+        f for f in git("diff", "--name-only", "-z", f"{base}...HEAD").split("\0") if f
     ]
     print(
         f"和 {base} 相比，改了 {len(changed)} 个文件：",
