@@ -44,3 +44,8 @@ Desktop.ini
 
 # ── WorkBuddy 会话记忆（个人上下文，不进版本库）──
 .workbuddy/
+
+# 覆盖率产物：跑 pytest --cov 时生成，不该入库
+.coverage
+.coverage.*
+htmlcov/
