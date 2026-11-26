@@ -288,6 +288,10 @@ def audit_text(text: str, path: str, mode: str = "strict") -> list[Violation]:
                 )
             )
 
+    # 建表语句是设计已落地的信号，必须已被候选对比覆盖。
+    # 放在最后：缺章节/无行的情形上面已 return，不重复报。
+    out.extend(check_design_coverage(text, path))
+
     return out
 
 

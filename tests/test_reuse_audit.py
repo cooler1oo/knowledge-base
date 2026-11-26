@@ -510,3 +510,61 @@ def test_design_coverage_skips_non_strict_dir() -> None:
 
     text = _doc_with("CREATE TABLE wobbly (id int);\n", "")
     assert check_design_coverage(text, "docs/research/x.md") == []
+
+
+def test_audit_text_includes_design_coverage_violation() -> None:
+    """接入调用链：audit_text 必须把设计覆盖问题一并返回。"""
+    text = _doc_with(
+        "CREATE TABLE mystery_table (id int);\n",
+        "| 内容模型 | karakeep-app/karakeep | 30862 | AGPL-3.0 | 参考 | Docker | "
+        "取其主表+分表结构设计 |\n",
+    )
+    violations = audit_text(text, "docs/tech/x.md", "strict")
+    assert "设计覆盖" in [v.rule for v in violations]
+
+
+def test_real_tech_plan_flags_uncovered_tables() -> None:
+    """对仓库里真实的 v8.0 跑一次：必须能提取到锚点，且不能全绿。
+
+    一条都不报说明锚点提取或覆盖判断失效了（假绿灯）。
+    """
+    from pathlib import Path
+
+    from tools.doc_checks.reuse import check_design_coverage, extract_design_anchors
+
+    root = Path(__file__).resolve().parents[1]
+    target = root / "docs" / "tech" / "2026-11-26-技术方案.md"
+    if not target.exists():
+        import pytest
+
+        pytest.skip("v8.0 文档不存在，跳过真实文档反向测试")
+    text = target.read_text(encoding="utf-8")
+    anchors = extract_design_anchors(text)
+    assert len(anchors) >= 10, f"锚点只提取到 {len(anchors)} 个，预期 >=10"
+    violations = check_design_coverage(text, "docs/tech/2026-11-26-技术方案.md")
+    assert len(violations) >= 1, "真实文档一条都不报 → 检查失效（假绿灯）"
+
+
+def test_design_coverage_reverse_injection_is_caught() -> None:
+    """反向测试：注入一个全新未覆盖的表名，必须被拦下。
+
+    这是防「检查永远绿」的核心用例——先断言注入成功再断言拦截成功，
+    两者任一失败都说明测试本身无效。
+    """
+    from pathlib import Path
+
+    from tools.doc_checks.reuse import check_design_coverage
+
+    root = Path(__file__).resolve().parents[1]
+    target = root / "docs" / "tech" / "2026-11-26-技术方案.md"
+    if not target.exists():
+        import pytest
+
+        pytest.skip("v8.0 文档不存在，跳过反向注入测试")
+    text = target.read_text(encoding="utf-8")
+    marker = "CREATE TABLE items ("
+    assert marker in text, "注入点不存在，反向测试无效"
+    injected = text.replace(marker, f"CREATE TABLE zzz_injected (id int);\n{marker}", 1)
+    assert "zzz_injected" in injected, "注入失败，反向测试无效"
+    v = check_design_coverage(injected, "docs/tech/2026-11-26-技术方案.md")
+    assert any("zzz_injected" in x.message for x in v), f"没拦住，实际输出: {v}"
