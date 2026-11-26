@@ -3,6 +3,7 @@ name = "knowledge-base"
 version = "0.1.0"
 description = "个人知识库：需求、设计、技术方案，以及约束这些文档的自动检查"
 requires-python = ">=3.10"
+dependencies = ["pg8000>=1.31"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.17", "pre-commit>=3.7"]
@@ -12,12 +13,18 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["tools", "tools.doc_checks"]
+packages = ["kb", "kb.store", "tools", "tools.doc_checks"]
+
+[tool.setuptools.package-data]
+"kb.store" = ["migrations/*.sql", "migrations/README.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-markers = ["slow: 慢检查，PR 上不跑，合进 main 之后跑"]
+markers = [
+    "slow: 慢检查，PR 上不跑，合进 main 之后跑",
+    "pg: 需要真实 Postgres，连不上时自动 skip",
+]
 
 [tool.ruff]
 line-length = 88
