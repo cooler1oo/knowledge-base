@@ -212,11 +212,11 @@ def check_file(p: Path) -> list[Violation]:
         *check_empty_sections(p, text),
         *check_placeholders(p, text),
     ]
-    # 复用调研只对技术方案要求（prd/specs/research 不需要选型表）
-    if p.parent.name == "tech":
-        from .reuse import audit_text
+    # 复用调研对所有设计文档生效，严格度按目录区分：
+    # tech 严格（要星数许可），prd/specs/research 宽松（只查结构与理由）
+    from .reuse import check_file as reuse_check
 
-        out.extend(audit_text(text, _rel(p)))
+    out.extend(reuse_check(p))
     return out
 
 
