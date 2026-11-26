@@ -553,21 +553,21 @@ def test_design_coverage_reverse_injection_is_caught() -> None:
 
     这是防「检查永远绿」的核心用例——先断言注入成功再断言拦截成功，
     两者任一失败都说明测试本身无效。
-    """
-    from pathlib import Path
 
+    用自造文档而非仓库里的真实文档：真实文档的写法会变（`CREATE TABLE x`
+    与 `CREATE TABLE IF NOT EXISTS x` 都合法），把测试绑在它上面会导致
+    「改文档 → 测试红」。测试要绑行为，不绑数据。
+    """
     from tools.doc_checks.reuse import check_design_coverage
 
-    root = Path(__file__).resolve().parents[1]
-    target = root / "docs" / "tech" / "2026-11-26-技术方案.md"
-    if not target.exists():
-        import pytest
-
-        pytest.skip("v8.0 文档不存在，跳过反向注入测试")
-    text = target.read_text(encoding="utf-8")
-    marker = "CREATE TABLE items ("
-    assert marker in text, "注入点不存在，反向测试无效"
-    injected = text.replace(marker, f"CREATE TABLE zzz_injected (id int);\n{marker}", 1)
-    assert "zzz_injected" in injected, "注入失败，反向测试无效"
-    v = check_design_coverage(injected, "docs/tech/2026-11-26-技术方案.md")
+    text = _doc_with(
+        "CREATE TABLE items (id bigserial);\n"
+        "CREATE TABLE IF NOT EXISTS zzz_injected (id int);\n",
+        "| 内容模型 | karakeep-app/karakeep | 30862 | AGPL-3.0 | 参考 | Docker | "
+        "取其主表+分表结构，用于设计 items 表 |\n",
+    )
+    assert "zzz_injected" in text, "注入失败，反向测试无效"
+    v = check_design_coverage(text, "docs/tech/x.md")
     assert any("zzz_injected" in x.message for x in v), f"没拦住，实际输出: {v}"
+    # 另一条断言：已覆盖的 items 不得被误报
+    assert not any("「items」" in x.message for x in v), f"误报已覆盖的表: {v}"
