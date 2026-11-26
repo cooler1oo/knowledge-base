@@ -21,6 +21,9 @@ markers = ["slow: 慢检查，PR 上不跑，合进 main 之后跑"]
 
 [tool.ruff]
 line-length = 88
+# 文档里的 Python 示例块不参与格式化：它们是说明书的一部分，
+# 手写对齐是为了可读性，ruff 自动改会破坏阅读顺序。
+extend-exclude = ["docs/**"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]

@@ -204,7 +204,7 @@ def check_referenced_paths(paths: list[Path]) -> list[Violation]:
 
 def check_file(p: Path) -> list[Violation]:
     text = p.read_text(encoding="utf-8")
-    return [
+    out = [
         *check_filename(p),
         *check_banned_words(p, text),
         *check_code_fences(p, text),
@@ -212,6 +212,12 @@ def check_file(p: Path) -> list[Violation]:
         *check_empty_sections(p, text),
         *check_placeholders(p, text),
     ]
+    # 复用调研只对技术方案要求（prd/specs/research 不需要选型表）
+    if p.parent.name == "tech":
+        from .reuse import audit_text
+
+        out.extend(audit_text(text, _rel(p)))
+    return out
 
 
 def run_checks(
