@@ -414,3 +414,41 @@ def test_transient_classifier() -> None:
     # 404 是真的不存在，属于文档问题
     assert is_transient("HTTP 404") is False
     assert is_transient(None) is False
+
+
+# ── 设计决策覆盖（design-coverage）────────────────────────
+
+
+def test_extract_design_anchors_only_inside_sql_fence() -> None:
+    """锚点只从 ```sql 代码块里取：正文叙述提到表名不算设计落地。"""
+    from tools.doc_checks.reuse import extract_design_anchors
+
+    text = (
+        "正文里提到 CREATE TABLE items 只是叙述。\n"
+        "\n"
+        "```sql\n"
+        "CREATE TABLE IF NOT EXISTS items (\n"
+        "  id bigserial PRIMARY KEY\n"
+        ");\n"
+        "CREATE TABLE tags (id bigserial);\n"
+        "```\n"
+    )
+    anchors = extract_design_anchors(text)
+    names = [n for _, n in anchors]
+    assert names == ["items", "tags"]
+
+
+def test_extract_design_anchors_handles_no_if_not_exists() -> None:
+    """`CREATE TABLE x (` 与 `CREATE TABLE IF NOT EXISTS x (` 都要识别。"""
+    from tools.doc_checks.reuse import extract_design_anchors
+
+    text = "```sql\nCREATE TABLE jobs (\n  id int\n);\n```\n"
+    assert [n for _, n in extract_design_anchors(text)] == ["jobs"]
+
+
+def test_extract_design_anchors_ignores_inline_code() -> None:
+    """行内 `CREATE TABLE x` 不是 DDL，不提锚点。"""
+    from tools.doc_checks.reuse import extract_design_anchors
+
+    text = "见 `CREATE TABLE items` 这一句。\n"
+    assert extract_design_anchors(text) == []

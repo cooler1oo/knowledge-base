@@ -448,6 +448,34 @@ def _check_row(row: ReuseRow, path: str, mode: str) -> list[Violation]:
     return out
 
 
+# 建表语句是「设计已落地」的最强信号：它一旦写进方案就是要照着建。
+# 只认 ```sql 围栏内的，因为正文与行内代码里的同名文本是叙述而非设计。
+_CREATE_TABLE_RE = re.compile(
+    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_]\w*)",
+    re.IGNORECASE,
+)
+
+
+def extract_design_anchors(text: str) -> list[tuple[int, str]]:
+    """取出正文里落地的设计锚点：[(行号, 表名), ...]。"""
+    out: list[tuple[int, str]] = []
+    in_sql = False
+    for i, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            # 只有 ```sql / ```SQL 开围栏才算；其它语言块跳过
+            if not in_sql and stripped.lower().startswith("```sql"):
+                in_sql = True
+            elif in_sql:
+                in_sql = False
+            continue
+        if not in_sql:
+            continue
+        for m in _CREATE_TABLE_RE.finditer(line):
+            out.append((i, m.group(1)))
+    return out
+
+
 def check_file(p: Path, mode: str | None = None) -> list[Violation]:
     mode = mode or mode_for(p)
     if mode is None:
