@@ -1,19 +1,21 @@
 """复用调研检查：把「先找现成的、不重复造轮子」变成可执行校验。
 
 适用范围是**所有设计场景**，不只是技术方案：
-- tech：技术选型，调研对象是代码库（要星数、要许可）
-- prd：需求设计，调研对象是现成产品与竞品（星数许可写 `-`）
+- tech：技术选型，调研对象是代码库（要星数、要许可、要运行环境）
+- prd：需求设计，调研对象是现成产品与竞品（星数许可可写 `-`）
 - specs：信息架构，调研对象是同类产品的组织方式
 
-两种严格度共用同一张六列表，区别只在 lite 模式不校验星数与许可。
+**本项目前提：个人非商用、单机自托管。** 因此校验重点不是「许可能不能商用」，
+而是「能不能在目标环境跑起来」与「会不会产生持续付费」。
+商用许可（GPL/AGPL/BUSL）在自用场景不触发义务，只要求写清即可，不做拦截。
 
 可机器判断的：
 - 章节存在、表格列数正确
 - 结论在枚举内
-- 任何一种结论都必须给理由，且理由不能是敷衍词
-- strict 模式下候选名须为 `owner/repo`（可查证）、星数为数字、许可在白名单
-- 星数低于阈值须标 ⚠
-- 全部「自写/无参考」须留下检索痕迹
+- 任何结论都必须给理由，且理由不能是敷衍词
+- strict 模式：候选名须 `owner/repo`、星数为数字、许可在白名单
+- strict 模式：**复用项必须写明运行环境**（Termux/proot/Docker/二进制）
+- strict 模式：**复用项必须写明是否有付费依赖**
 
 不可机器判断、留给人工：
 - 调研是否穷尽（搜到一个冷门项目也算查过）
@@ -24,6 +26,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -33,8 +36,30 @@ from pathlib import Path
 from . import Violation, _rel
 
 SECTION_KEYWORD = "复用调研"
-COLUMNS = ("组件", "候选", "星数", "许可", "结论", "理由")
+# 七列：比商用场景多一列「运行环境」，因为本项目最常被否决的原因是跑不起来。
+COLUMNS = ("组件", "候选", "星数", "许可", "结论", "运行环境", "理由")
+LEGACY_COLUMNS_6 = ("组件", "候选", "星数", "许可", "结论", "理由")
 CONCLUSIONS = {"复用", "参考", "不采用", "自写"}
+
+# 运行环境标记：必须能看出它靠什么跑、是否需要编译
+RUNTIME_MARKS = (
+    "Termux",
+    "proot",
+    "Docker",
+    "静态二进制",
+    "纯Python",
+    "纯 Python",
+    "需编译",
+    "aarch64",
+    "ARM",
+    "浏览器",
+    "云托管",
+    "不支持",
+)
+FREE_MARKS = ("免费", "免费额度", "无付费", "自托管免费", "开源免费", "Ollama")
+PAID_MARKS = ("付费", "订阅", "按量", "API 计费", "需绑卡", "商用授权", "订阅制")
+# 写了具体金额就算交代清楚，放行。匹配「月 5 元」「每条 0.02 元」「¥10/月」
+COST_RE = re.compile(r"(?:[¥￥]\s*\d+|\d+(?:\.\d+)?\s*元)(?:/|\s*每|\s*月|\s*年)?")
 
 # 每个目录对应一种严格度
 STRICT_DIRS = {"tech"}
@@ -91,6 +116,7 @@ class ReuseRow:
     stars: str
     license: str
     conclusion: str
+    runtime: str
     reason: str
     line: int
 
@@ -148,24 +174,65 @@ def _section_lines(text: str) -> tuple[bool, list[tuple[int, str]]]:
 
 
 def parse_audit(text: str) -> ReuseAudit:
+    """解析六列（旧）或七列（新）表格。
+
+    只认**表头匹配**的表格：靠列数判断会把任何七列表（如「项|内容」）都吃进来。
+    旧格式没有「运行环境」列，映射时置空而不是丢弃——
+    否则旧文档会静默变成「零行」，看起来像通过。
+    """
     audit = ReuseAudit()
     found, body = _section_lines(text)
     audit.found_section = found
     if not found:
         return audit
 
-    header: list[str] | None = None
+    current_kind: str | None = None
+    seen_header = False
+    in_fence = False
     for lineno, line in body:
-        if not line.startswith("|"):
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or not line.startswith("|"):
+            # 空行或非表格行表示表格结束，允许后面出现新表
+            if not line.strip():
+                current_kind = None
+                seen_header = False
             continue
         cells = _split_cells(line)
         if _is_separator(cells):
             continue
-        if header is None:
-            header = cells
+
+        # 只在每张表的**第一行**判断表头。若第一行就是标准表头，跳过它；
+        # 否则视为数据行（有些文档省略表头，或表头被改写过）。
+        if not seen_header:
+            seen_header = True
+            if tuple(cells) == COLUMNS:
+                current_kind = "seven"
+                continue
+            if tuple(cells) == LEGACY_COLUMNS_6:
+                current_kind = "six"
+                continue
+            # 没识别到标准表头，按列数推断，并把这一行当数据处理
+            if len(cells) == len(COLUMNS):
+                current_kind = "seven"
+            elif len(cells) == len(LEGACY_COLUMNS_6):
+                current_kind = "six"
+            else:
+                current_kind = "other"
+                continue
+
+        if current_kind == "other":
             continue
-        if len(cells) != len(COLUMNS):
-            continue
+
+        if current_kind == "seven":
+            if len(cells) != len(COLUMNS):
+                continue
+            runtime, reason = cells[5], cells[6]
+        else:
+            if len(cells) != len(LEGACY_COLUMNS_6):
+                continue
+            runtime, reason = "", cells[5]
         audit.rows.append(
             ReuseRow(
                 component=cells[0],
@@ -173,7 +240,8 @@ def parse_audit(text: str) -> ReuseAudit:
                 stars=cells[2],
                 license=cells[3],
                 conclusion=cells[4],
-                reason=cells[5],
+                runtime=runtime,
+                reason=reason,
                 line=lineno,
             )
         )
@@ -265,9 +333,9 @@ def _check_row(row: ReuseRow, path: str, mode: str) -> list[Violation]:
         )
 
     # 「参考」必须说清参考了什么，否则等于免死金牌
-    if row.conclusion == "参考" and not any(
-        k in reason for k in ("取", "借", "学", "模", "用其", "沿用")
-    ):
+    # 关键词覆盖通顺写法：「取其X」「借用X」「沿用X」「只采用X」「参考X的做法」
+    REFER_VERBS = ("取", "借", "学", "模", "沿用", "采用", "参考")
+    if row.conclusion == "参考" and not any(k in reason for k in REFER_VERBS):
         out.append(
             Violation(
                 path,
@@ -310,7 +378,7 @@ def _check_row(row: ReuseRow, path: str, mode: str) -> list[Violation]:
 
     if row.conclusion in {"复用", "参考"}:
         lic = row.license
-        # 复合许可（如 "MIT AND BUSL-1.1"）按其中最强的限制判定
+        # 复合许可（如 "MIT AND BUSL-1.1"）拆开逐项识别
         parts = {x.strip() for x in re.split(r"\s+AND\s+|\s+OR\s+|\s*/\s*", lic)}
         has_source_available = bool(parts & SOURCE_AVAILABLE)
         has_copyleft = bool(parts & COPYLEFT)
@@ -319,26 +387,60 @@ def _check_row(row: ReuseRow, path: str, mode: str) -> list[Violation]:
             out.append(
                 Violation(path, ln, "复用调研", f"许可「{lic}」不在已知白名单内")
             )
-        elif has_copyleft and not any(x in row.reason for x in parts & COPYLEFT):
+        elif has_copyleft or has_source_available:
+            # 个人非商用场景：GPL/AGPL/BUSL 都不触发对外义务，不构成拦截。
+            # 但仍要求写一句「为什么不影响」，避免有人照抄却真去开公司。
+            restrict = (parts & COPYLEFT) | (parts & SOURCE_AVAILABLE)
+            if not any(k in row.reason for k in ("自用", "不商用", "不分发", "不对外")):
+                out.append(
+                    Violation(
+                        path,
+                        ln,
+                        "复用调研",
+                        f"选用了 {'/'.join(sorted(restrict))}，理由里须说明"
+                        "「个人自用不触发其义务」",
+                    )
+                )
+
+    # ── 运行环境：本项目最常被否决的原因，必须写 ──
+    if row.conclusion == "复用":
+        rt = row.runtime.strip()
+        if not rt or rt in LITE_PLACEHOLDER:
             out.append(
                 Violation(
                     path,
                     ln,
                     "复用调研",
-                    f"选用了 {lic}，理由里须写明传染性许可的影响",
+                    "复用项必须填运行环境（Termux/proot/Docker/静态二进制等），"
+                    "否则无法判断能否在平板上跑",
                 )
             )
-        elif (
-            has_source_available
-            and not any(x in row.reason for x in parts & SOURCE_AVAILABLE)
-            and not any(k in row.reason for k in ("商用", "授权", "限制", "自用"))
-        ):
+        elif not any(m in rt for m in RUNTIME_MARKS):
             out.append(
                 Violation(
                     path,
                     ln,
                     "复用调研",
-                    f"选用了 {lic}（源码可得但有商用限制），理由里须写明该限制",
+                    f"运行环境「{rt}」看不出运行方式，须含 "
+                    f"{'/'.join(RUNTIME_MARKS[:5])} 之一",
+                )
+            )
+
+    # ── 付费依赖：个人使用不接受「说不清多少钱」的开销 ──
+    # 规则本意不是禁止付费，是禁止「按量计费」这种事后才知道账单的模糊表述。
+    # 写出具体金额或明确免费，就放行。
+    if row.conclusion in {"复用", "参考"}:
+        cell = f"{row.runtime} {row.reason}"
+        mentions_paid = any(k in cell for k in PAID_MARKS)
+        states_cost = any(k in cell for k in FREE_MARKS) or bool(COST_RE.search(cell))
+        if mentions_paid and not states_cost:
+            out.append(
+                Violation(
+                    path,
+                    ln,
+                    "复用调研",
+                    "该方案含付费/订阅/按量计费，须写出具体金额（如「月 5 元」）"
+                    "或明确免费，否则账单不可预期",
                 )
             )
 
@@ -382,16 +484,24 @@ class RemoteCheck:
         return self.claimed_license != self.actual_license
 
 
+# 支持用环境变量提供 token，把匿名 60 次/小时 提到 5000 次/小时。
+# CI 里配 GITHUB_TOKEN 即可；本地不配也能跑，只是容易打满配额。
+GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
+# 限流与网络故障不等于「文档写错」，要能区分开，否则 CI 会被误报刷屏。
+TRANSIENT_ERRORS = ("HTTP 403", "HTTP 429", "URLError", "TimeoutError", "HTTP 5")
+
+
 def fetch_repo(candidate: str, timeout: int = 15) -> tuple[int | None, str, str | None]:
     """返回 (星数, 许可, 错误)。"""
     url = f"https://api.github.com/repos/{candidate}"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "kb-doc-checks",
-        },
-    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "kb-doc-checks",
+    }
+    token = os.environ.get(GITHUB_TOKEN_ENV)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.load(resp)
@@ -405,13 +515,26 @@ def fetch_repo(candidate: str, timeout: int = 15) -> tuple[int | None, str, str 
     return stars, lic, None
 
 
+def is_transient(err: str | None) -> bool:
+    """限流、超时、5xx 属于环境问题，不该判文档有错。"""
+    if not err:
+        return False
+    return any(tag in err for tag in TRANSIENT_ERRORS)
+
+
 def verify_remote(text: str, path: str, mode: str = "strict") -> list[Violation]:
-    """联网核对候选的星数与许可，只报「声称多于实际」与许可不符。"""
+    """联网核对候选的星数与许可，只报「声称多于实际」与许可不符。
+
+    环境故障（限流/超时/5xx）抛 RemoteUnavailable，由调用方决定跳过，
+    不要混进 Violation —— 否则 CI 每天都会因为打满配额而红。
+    """
     if mode != "strict":
         return []
     audit = parse_audit(text)
     out: list[Violation] = []
     seen: dict[str, tuple[int | None, str]] = {}
+    transient_hit = False
+    checked = 0
 
     for row in audit.rows:
         if row.conclusion == "自写" or not REPO_RE.match(row.candidate):
@@ -419,10 +542,13 @@ def verify_remote(text: str, path: str, mode: str = "strict") -> list[Violation]
         if row.candidate in seen:
             actual_stars, actual_lic = seen[row.candidate]
         else:
-            actual_stars, actual_lic = fetch_repo(row.candidate)[:2]
+            actual_stars, actual_lic, err = fetch_repo(row.candidate)
             seen[row.candidate] = (actual_stars, actual_lic)
+            if is_transient(err):
+                transient_hit = True
         if actual_stars is None:
             continue
+        checked += 1
 
         claimed = (
             int(row.stars.replace(",", ""))
@@ -447,4 +573,14 @@ def verify_remote(text: str, path: str, mode: str = "strict") -> list[Violation]
                     f"{row.candidate} 许可写 {row.license}，实际 {actual_lic}",
                 )
             )
+
+    if checked == 0 and transient_hit:
+        raise RemoteUnavailable(
+            "GitHub API 不可用或已限流，无法核对；"
+            f"设置环境变量 {GITHUB_TOKEN_ENV} 可把配额从 60/小时提到 5000/小时"
+        )
     return out
+
+
+class RemoteUnavailable(RuntimeError):
+    """联网核对因环境原因无法进行，与文档是否正确无关。"""

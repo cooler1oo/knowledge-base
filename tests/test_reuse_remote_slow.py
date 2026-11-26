@@ -1,13 +1,18 @@
 """慢检查：技术方案里写的星数与许可，是否与 GitHub 实际一致。
 
 标 slow 的原因：要联网请求 GitHub，改动单个文档时不值得跑，留给合进 main 之后。
-断网时跳过而不是失败——离线开发不该被这条拦住。
+
+两类「不通过」要分开：
+- 文档写错了（星数虚报、许可不符）→ 失败，必须改文档
+- 环境不可用（限流、断网、5xx）→ 跳过，不阻塞离线开发
+
+匿名调用 GitHub 只有 60 次/小时，配 GITHUB_TOKEN 可提到 5000。
 """
 
 import pytest
 
 from tools.doc_checks import docs_files
-from tools.doc_checks.reuse import mode_for, verify_remote
+from tools.doc_checks.reuse import RemoteUnavailable, mode_for, verify_remote
 
 pytestmark = pytest.mark.slow
 
@@ -20,12 +25,11 @@ def test_reuse_table_matches_github() -> None:
         if mode != "strict":
             continue
         text = p.read_text(encoding="utf-8")
-        hits = verify_remote(text, p.as_posix(), mode)
-        if hits:
-            # 全是网络错误说明是断网，不算文档问题
-            if all("TypeError" in str(h) or "URLError" in str(h) for h in hits):
-                pytest.skip("无法访问 GitHub，跳过联网核对")
-            violations.extend(hits)
+        try:
+            hits = verify_remote(text, p.as_posix(), mode)
+        except RemoteUnavailable as exc:
+            pytest.skip(str(exc))
+        violations.extend(hits)
         checked += 1
 
     if checked == 0:
