@@ -21,9 +21,12 @@ packages = ["kb", "kb.store", "tools", "tools.doc_checks"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# -ra：跳过与失败的原因始终打印。缺了它，一次「全跳过」在 -q 下只剩
+# 16 个 s，看不出为什么，等于把事故藏起来（2026-11-26 真踩过）。
+addopts = "-ra"
 markers = [
     "slow: 慢检查，PR 上不跑，合进 main 之后跑",
-    "pg: 需要真实 Postgres，连不上时自动 skip",
+    "pg: 需要真实 Postgres，未设置 KB_PG_* 时自动 skip",
 ]
 
 [tool.ruff]
