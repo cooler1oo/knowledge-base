@@ -523,26 +523,29 @@ def test_audit_text_includes_design_coverage_violation() -> None:
     assert "设计覆盖" in [v.rule for v in violations]
 
 
-def test_real_tech_plan_flags_uncovered_tables() -> None:
-    """对仓库里真实的 v8.0 跑一次：必须能提取到锚点，且不能全绿。
+def test_real_tech_plan_anchors_are_extracted() -> None:
+    """对仓库里真实的 v8.0 跑一次：锚点必须被提取出来。
 
-    一条都不报说明锚点提取或覆盖判断失效了（假绿灯）。
+    这条只断言「提取器能认出真实文档里的建表语句」，不断言「文档必须有违规」——
+    后者会随文档内容变化而失效（把文档补齐后测试反而红了），
+    那是把测试绑在数据上，不是绑在行为上。
+    真正防假绿灯的是下面的反向注入测试。
     """
     from pathlib import Path
 
-    from tools.doc_checks.reuse import check_design_coverage, extract_design_anchors
+    from tools.doc_checks.reuse import extract_design_anchors
 
     root = Path(__file__).resolve().parents[1]
     target = root / "docs" / "tech" / "2026-11-26-技术方案.md"
     if not target.exists():
         import pytest
 
-        pytest.skip("v8.0 文档不存在，跳过真实文档反向测试")
+        pytest.skip("v8.0 文档不存在，跳过真实文档锚点测试")
     text = target.read_text(encoding="utf-8")
     anchors = extract_design_anchors(text)
     assert len(anchors) >= 10, f"锚点只提取到 {len(anchors)} 个，预期 >=10"
-    violations = check_design_coverage(text, "docs/tech/2026-11-26-技术方案.md")
-    assert len(violations) >= 1, "真实文档一条都不报 → 检查失效（假绿灯）"
+    names = {n for _, n in anchors}
+    assert {"items", "jobs", "sessions"} <= names, f"关键表未提取到，实得 {names}"
 
 
 def test_design_coverage_reverse_injection_is_caught() -> None:
