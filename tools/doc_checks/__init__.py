@@ -48,11 +48,24 @@ def _rel(p: Path) -> str:
 
 
 def docs_files() -> list[Path]:
+    """列出所有要检查的文档。
+
+    必须用 `rglob`（递归）而不是 `glob`（只一层）。
+
+    这是 2026-11-27 排查出的第五处同类问题：前面修的 `mode_for` 与
+    `check_banned_words` 都是「拿到文件之后怎么判」，而这里决定「文件能不能
+    被拿到」。用 `glob("*.md")` 时子目录里的文档压根不会进入检查范围，
+    前面三处修得再对也白费——而且没有任何「未检查」的输出。
+
+    同一根因（只认一层目录）在本文件与 reuse.py 内一共出现 4 次，
+    说明这不是笔误，是写路径判断时的惯性。后续新增任何按目录的分支，
+    都要问一句「子目录里的文件会怎样」。
+    """
     out: list[Path] = []
     for d in DOC_DIRS:
         base = DOC_ROOT / d
         if base.is_dir():
-            out.extend(sorted(base.glob("*.md")))
+            out.extend(sorted(base.rglob("*.md")))
     return out
 
 

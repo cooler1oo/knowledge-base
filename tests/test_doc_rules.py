@@ -61,3 +61,31 @@ def test_引用块之外的禁用词照样要报():
     text = "> 这是引用，含通常。\n\n这个方案通常能跑通。\n"
     violations = check_banned_words(Path("docs/tech/a.md"), text)
     assert len(violations) == 1, f"只该报正文那一行：{violations}"
+
+
+def test_文档扫描要递归到子目录(tmp_path, monkeypatch):
+    """docs_files 用 glob("*.md") 只扫一层。
+
+    这意味着即使 mode_for / check_banned_words 都修好了，
+    子目录里的文档压根不会被发现——修了三处「目录判定」，
+    却漏了最上游的「文件发现」。这是同一个根因的第五处表现。
+
+    用假 docs 目录验证，不碰真实仓库。
+    """
+    from tools.doc_checks import docs_files
+
+    fake = tmp_path / "docs"
+    (fake / "tech" / "2026").mkdir(parents=True)
+    (fake / "tech" / "top.md").write_text("# 顶层\n", encoding="utf-8")
+    (fake / "tech" / "2026" / "deep.md").write_text("# 子目录\n", encoding="utf-8")
+    (fake / "tech" / "2026" / "11").mkdir(parents=True)
+    (fake / "tech" / "2026" / "11" / "deeper.md").write_text(
+        "# 多层\n", encoding="utf-8"
+    )
+
+    monkeypatch.setattr("tools.doc_checks.DOC_ROOT", fake)
+    found = {p.name for p in docs_files()}
+
+    assert "top.md" in found, "顶层文档没扫到"
+    assert "deep.md" in found, "子目录文档没扫到"
+    assert "deeper.md" in found, "多层子目录文档没扫到"
