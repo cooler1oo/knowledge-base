@@ -123,6 +123,85 @@ def test_seed_covers_eight_preset_kinds():
     assert len(set(kinds)) == 8
 
 
+# ── 0004：AI 标签种子（AI-03 / F6）────────────────────────────
+#
+# 为什么必须是独立的 0004 而不是改 0003：`migrate.py` 的 `plan()` 只执行
+# 「版本号未记录」的文件。平板真库的 `schema_migrations` 里已有版本 3，
+# 改 0003 在那个库上**永远不会执行**，8 个预置标签一行都进不去，
+# AI-02 的「只能从词表挑」在功能上退化成「AI 永不打标签」。
+
+
+AI_TAG_NAMES = (
+    "AI相关",
+    "工作赚钱",
+    "学点东西",
+    "生活过日子",
+    "健康",
+    "好看的东西",
+    "好玩放松",
+    "先存着以后用",
+)
+
+
+def _ai_tag_seed() -> str:
+    path = MIGRATIONS_DIR / "0004_seed_ai_tags.sql"
+    assert path.is_file(), (
+        "必须新开 0004_seed_ai_tags.sql（改 0003 在已部署库上不执行）"
+    )
+    return path.read_text(encoding="utf-8")
+
+
+def _strip_comments(sql: str) -> str:
+    """去掉 `--` 行注释，只留可执行语句。
+
+    为什么需要它：0004 的注释里**故意**写了 `on conflict (name)` 与
+    `parent_id` 作为反面教材。不断言在注释上，测试会把自己讲道理的段落
+    当成违规。
+    """
+    return "\n".join(
+        line for line in sql.splitlines() if not line.lstrip().startswith("--")
+    )
+
+
+def _ai_tag_sql() -> str:
+    """可执行部分（已去注释、已小写），供静态断言使用。"""
+    return _strip_comments(_ai_tag_seed()).lower()
+
+
+def test_0004_种子插8个一级标签_重复执行仍为8行_F6():
+    """F6：迁移跑两次，预置标签仍是 8 行。
+
+    断言两条：① SQL 里正好 8 个名字；② 必须写 `on conflict do nothing`
+    （幂等），否则第二次执行主键冲突。
+    """
+    sql = _strip_comments(_ai_tag_seed())
+    names = re.findall(r"^\s*\('([^']+)',", sql, re.M)
+    assert len(names) == 8, f"应当是 8 个一级标签，实际 {len(names)}：{names}"
+    assert tuple(names) == AI_TAG_NAMES, f"标签名与 AI-03 不一致：{names}"
+    assert "on conflict do nothing" in sql.lower(), "缺幂等子句，第二次执行会冲突"
+
+
+def test_0004_conflict_子句必须是裸写法不是列名():
+    """`tags` 的唯一索引是表达式索引 `on tags (coalesce(parent_id, 0), lower(btrim(name)))`。
+
+    PG 不允许表达式索引用作 `on conflict (cols)` 的仲裁索引，写
+    `on conflict (name) do nothing` 会直接报「没有匹配的唯一约束」。
+    这条断言把「必须裸写」钉在测试里，避免后来的人「顺手补个列名」。
+    """
+    sql = _ai_tag_sql()
+    assert "on conflict do nothing" in sql
+    assert "on conflict (" not in sql, "表达式唯一索引不能被列为仲裁目标，必须裸写"
+
+
+def test_0004_种子标签_is_preset_为真且_parent_为空_AI_03():
+    """AI-03：8 个都是 `is_preset=true` 的**一级**标签，用户可改可删。"""
+    sql = _ai_tag_sql()
+    assert "is_preset" in sql, "没写 is_preset 列"
+    # 每行都显式给 true，不能靠列默认值（默认是 false）
+    assert len(re.findall(r"\btrue\b", sql)) == 8, "8 行都得显式 is_preset=true"
+    assert "parent_id" not in sql, "一级标签不该出现 parent_id 赋值"
+
+
 # ── 迁移器行为（fake 连接）─────────────────────────────────────
 
 
