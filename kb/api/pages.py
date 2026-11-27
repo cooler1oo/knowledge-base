@@ -1,13 +1,16 @@
 """两个极简页面：登录页、首页。
 
-本轮只求「手机浏览器能打开并登录」（R2 判据），所以不引前端框架、不引构建步骤，
-一个文件里内联样式。真正的界面在后续轮次，这里不做设计投入。
+不引前端框架、不引构建步骤，一个文件里内联样式。首页的提交框是 R4 的
+「最小可用入口」——能在手机上粘一条进来就算达标，真正的取用界面在后续轮次。
 """
 
 from __future__ import annotations
 
 import html
 import json
+from collections.abc import Sequence
+
+from kb.store.items import ItemSummary
 
 _BASE_STYLE = """
   :root { color-scheme: light dark; }
@@ -48,6 +51,34 @@ _BASE_STYLE = """
          padding: 9px 0; border-bottom: 1px solid #eee; font-size: 14px; }
   .row:last-child { border-bottom: 0; }
   code { font-size: 13px; }
+  textarea {
+    width: 100%; padding: 11px 12px; font-size: 16px; border-radius: 9px;
+    border: 1px solid #d7d7dc; background: #fff; resize: vertical;
+    font-family: inherit; line-height: 1.5;
+  }
+  .composer { margin: 0 0 22px; }
+  .composer button { margin-top: 10px; }
+  .item { align-items: center; }
+  .item-main { min-width: 0; }
+  .item-title {
+    font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .item-meta { font-size: 12px; margin-top: 2px; }
+  .badge {
+    flex: 0 0 auto; font-size: 12px; padding: 3px 9px; border-radius: 999px;
+    background: #eef1f6; color: #41506b; white-space: nowrap;
+  }
+  .badge.done { background: #e6f4ea; color: #1e6b36; }
+  .badge.fail { background: #fdeaea; color: #a32217; }
+  .badge.idle { background: transparent; color: #8a8a92; }
+  @media (prefers-color-scheme: dark) {
+    textarea { background: #131315 !important; color: #ececee !important;
+               border-color: #3a3a40 !important; }
+    .badge { background: #26262c; color: #b9c2d4; }
+    .badge.done { background: #16351f; color: #7fd39a; }
+    .badge.fail { background: #3a1c1a; color: #f2887d; }
+    .badge.idle { background: transparent; color: #8a8a92; }
+  }
 """
 
 _LOGIN_BODY = """
@@ -121,7 +152,9 @@ def login_page(bootstrap: bool = False, error: str = "") -> str:
 <body>{body}</body></html>"
 
 
-def home_page(username: str, health: dict[str, object]) -> str:
+def home_page(
+    username: str, health: dict[str, object], recent: Sequence[ItemSummary] = ()
+) -> str:
     rows = "".join(
         f'<div class="row"><span>{html.escape(label)}</span>'
         f"<code>{html.escape(_fmt(health.get(key)))}</code></div>"
@@ -134,26 +167,86 @@ def home_page(username: str, health: dict[str, object]) -> str:
             ("workerHeartbeatAt", "worker 心跳"),
         )
     )
+    items_html = (
+        "".join(_item_row(item) for item in recent)
+        if recent
+        else '<p class="muted">还没有内容，上面粘一条试试。</p>'
+    )
     payload = html.escape(json.dumps(health, ensure_ascii=False, indent=2))
     return f"""<!doctype html><html lang=zh-CN><head><meta charset=utf-8>
 <meta name=viewport content='width=device-width,initial-scale=1'>
 <title>个人知识库</title><style>{_BASE_STYLE}</style></head>
 <body><div class="card">
   <h1>你好，{html.escape(username)}</h1>
-  <p class="muted">登录态已生效（Cookie 会话）。这一页是 R2 的骨架，
-  真正的取用界面在后续轮次。</p>
-  {rows}
-  <button id="out" type="button">退出登录</button>
-  <details style="margin-top:18px"><summary class="muted">健康检查原始返回</summary>
+  <p class="muted">粘一条链接或一段文字进来，先存下，后台慢慢处理。</p>
+  <form class="composer" id="composer">
+    <textarea id="q" rows="2" placeholder="粘贴链接或一段文字，丢进来就行"></textarea>
+    <button id="save" type="submit">存起来</button>
+    <div class="err" id="ce"></div>
+  </form>
+  <p class="muted">最近存进来的（{len(recent)} 条）</p>
+  {items_html}
+  <details style="margin-top:18px"><summary class="muted">健康检查</summary>
+    {rows}
     <pre style="overflow:auto;font-size:12px">{payload}</pre></details>
+  <button id="out" type="button">退出登录</button>
 </div>
 <script>
+  const form = document.getElementById('composer');
+  const box = document.getElementById('q');
+  const btn = document.getElementById('save');
+  const err = document.getElementById('ce');
+  form.addEventListener('submit', async (ev) => {{
+    ev.preventDefault();
+    const text = box.value.trim();
+    err.textContent = '';
+    if (!text) {{ err.textContent = '先粘点东西进来'; return; }}
+    // 含链接就按「存链接」发，链接之外的原文一并带上当分享文案；
+    // 不含链接就按「存一段文字」发。
+    const found = text.match(/https?:\\/\\/\\S+/);
+    const body = found ? {{url: found[0], raw_text: text}} : {{text: text}};
+    btn.disabled = true; btn.textContent = '存中…';
+    try {{
+      const r = await fetch('/api/items', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify(body),
+      }});
+      const data = await r.json().catch(() => ({{}}));
+      if (r.ok) {{ location.reload(); return; }}
+      err.textContent = data.error || ('保存失败（HTTP ' + r.status + '）');
+    }} catch (e) {{
+      err.textContent = '网络错误：' + e;
+    }}
+    btn.disabled = false; btn.textContent = '存起来';
+  }});
   document.getElementById('out').addEventListener('click', async () => {{
     await fetch('/api/auth/logout', {{method: 'POST'}});
     location.replace('/login');
   }});
 </script>
 </body></html>"""
+
+
+_STATUS_LABELS: dict[str, tuple[str, str]] = {
+    "pending": ("待处理", "wait"),
+    "running": ("处理中", "busy"),
+    "done": ("已完成", "done"),
+    "failed": ("失败", "fail"),
+    "none": ("—", "idle"),
+}
+
+
+def _item_row(item: ItemSummary) -> str:
+    label, css = _STATUS_LABELS.get(item.status, ("—", "idle"))
+    title = item.title or "未命名"
+    meta = item.source_domain or "纯文字"
+    return (
+        '<div class="row item">'
+        f'<div class="item-main"><div class="item-title">{html.escape(title)}</div>'
+        f'<div class="item-meta muted">{html.escape(meta)}</div></div>'
+        f'<span class="badge {css}">{label}</span></div>'
+    )
 
 
 def _fmt(value: object) -> str:

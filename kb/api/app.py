@@ -1,6 +1,7 @@
 """Starlette 应用：路由 + 鉴权中间件。
 
-R2 只实现 §8.1 端点表里的 4 个（bootstrap / login / logout / health）+ 两个页面。
+已实现（§8.1 端点表的 1/2/3/4/5/6/28 号）：bootstrap / login / logout /
+items 三个 / health，加登录页与首页两个页面。
 其余端点在后续轮次，这里不占位、不留 `pass`——没实现的路径就该 404。
 
 鉴权口径：除了白名单，一律要求有效 Cookie 会话。
@@ -22,9 +23,11 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 from starlette.routing import Route
 
 from kb.store import accounts
+from kb.store import items as items_store
 from kb.store.db import Pool
 
 from . import auth, health, pages
+from . import items as items_api
 
 PUBLIC_PATHS = frozenset(
     {"/login", "/api/auth/login", "/api/auth/bootstrap", "/api/health", "/favicon.ico"}
@@ -112,7 +115,12 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
     async def home(request: Request) -> Response:
         username = getattr(request.state, "username", "")
         report = health.check(pool, cfg.meili_url, cfg.media_root)
-        return HTMLResponse(pages.home_page(username, report))
+        try:
+            with pool.connection() as conn:
+                recent = items_store.list_items(conn, limit=20, before_id=None)
+        except Exception:  # noqa: BLE001 库没起来时页面仍要能打开，问题由健康检查如实反映
+            recent = []
+        return HTMLResponse(pages.home_page(username, report, recent))
 
     async def api_health(_request: Request) -> Response:
         return JSONResponse(health.check(pool, cfg.meili_url, cfg.media_root))
@@ -183,6 +191,8 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
         Route("/", home),
         Route("/login", login_page),
         Route("/api/health", api_health),
+        Route("/api/items", items_api.create_or_list(pool), methods=["POST", "GET"]),
+        Route("/api/items/{item_id:int}", items_api.detail(pool)),
         Route("/api/auth/bootstrap", api_bootstrap, methods=["POST"]),
         Route("/api/auth/login", api_login, methods=["POST"]),
         Route("/api/auth/logout", api_logout, methods=["POST"]),
