@@ -61,15 +61,24 @@ def _line_of(text: str, pos: int) -> int:
 
 
 def check_banned_words(p: Path, text: str) -> list[Violation]:
-    """禁用词只查 docs/tech。
+    """禁用词只查 docs/tech（含其子目录）。
 
     其他文档里这些词多为引用用户原话（「大概是蓝色」）或调研记录中的判断，
     在那里做关键词拦截会大量误报，最后的结果是整个检查被关掉。
+
+    目录判定要**看整条路径**，不能只看父目录名：`docs/tech/2026/x.md` 的
+    父目录叫 `2026`，旧写法 `p.parent.name != "tech"` 会让这类文件整条跳过，
+    且没有任何提示。同一个错误在 reuse.py 的 mode_for 里也出现过，一并修掉。
     """
-    if p.parent.name != "tech":
+    if "tech" not in p.parts:
         return []
     out: list[Violation] = []
     for i, line in enumerate(text.splitlines(), start=1):
+        # 引用块（> 开头）是别人的原话，不是作者的判断。
+        # 把模型转写原文或用户原话判成违规，会逼人改写引用——原文的可比对
+        # 价值就没了。跳过引用不等于放过正文：非引用行照查。
+        if line.lstrip().startswith(">"):
+            continue
         if any(esc in line for esc in BANNED_ESCAPE):
             continue
         for w in BANNED_WORDS:
