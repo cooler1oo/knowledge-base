@@ -257,3 +257,98 @@ def test_meili_ok_survives_non_object_json(monkeypatch):
         health.urllib.request, "urlopen", lambda *_a, **_k: _Resp(b'["available"]')
     )
     assert health.meili_ok("http://127.0.0.1:7700") is False
+
+
+# ── HTTP 层：手写最小 ASGI 驱动（不引 httpx）────────────────────
+#
+# 为什么要有这层：app.py 的路由与鉴权中间件此前只有 curl 端到端验证，
+# 改 handler 逻辑单测不会红。这里直接调 ASGI 接口，零额外依赖。
+
+import asyncio  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from kb.api.app import AppConfig, create_app  # noqa: E402
+
+
+class _Conn:
+    def run(self, sql: str, **_params: object) -> list[list[object]]:
+        return [[1]] if "select 1" in sql else []
+
+    def close(self) -> None:
+        return None
+
+
+class _Pool:
+    @contextmanager
+    def connection(self):  # type: ignore[no-untyped-def]
+        yield _Conn()
+
+    def close_all(self) -> None:
+        return None
+
+
+def _call(
+    app, path: str, method: str = "GET", body: object = None, cookie: str | None = None
+):  # type: ignore[no-untyped-def]
+    async def go():  # type: ignore[no-untyped-def]
+        raw = json.dumps(body).encode() if body is not None else b""
+        headers = [(b"cookie", cookie.encode())] if cookie else []
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": method,
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": headers,
+            "client": ("t", 1),
+            "server": ("t", 80),
+        }
+        state = {"sent": False}
+
+        async def receive():  # type: ignore[no-untyped-def]
+            if state["sent"]:
+                return {"type": "http.disconnect"}
+            state["sent"] = True
+            return {"type": "http.request", "body": raw, "more_body": False}
+
+        out = {"status": 0, "body": b""}
+
+        async def send(message):  # type: ignore[no-untyped-def]
+            if message["type"] == "http.response.start":
+                out["status"] = message["status"]
+            elif message["type"] == "http.response.body":
+                out["body"] += message.get("body", b"")
+
+        await app(scope, receive, send)
+        return out
+
+    return asyncio.run(go())
+
+
+def _app():  # type: ignore[no-untyped-def]
+    return create_app(_Pool(), AppConfig("http://127.0.0.1:7700", Path(".")))
+
+
+def test_http_未登录访问首页跳登录页():
+    assert _call(_app(), "/")["status"] == 303
+
+
+def test_http_未登录访问_api_返回_401():
+    assert _call(_app(), "/api/items")["status"] == 401
+
+
+def test_http_health_不需要登录():
+    r = _call(_app(), "/api/health")
+    assert r["status"] == 200
+    assert b"dbOk" in r["body"]
+
+
+def test_http_登录页可匿名打开():
+    r = _call(_app(), "/login")
+    assert r["status"] == 200
+    assert "个人知识库" in r["body"].decode()
