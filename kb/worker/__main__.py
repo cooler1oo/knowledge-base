@@ -27,6 +27,52 @@ from .loop import run_forever
 
 log = logging.getLogger(__name__)
 
+
+def ensure_ai_available() -> None:
+    """启动阶段就确认 AI 的**传输实现**能 import。缺 `httpx` 时报错并退出（`B27`）。
+
+    **为什么不能在领到第一条任务时才失败**：那时 worker 已经写了心跳、
+    `/api/health` 显示 `workerOk: true`、用户以为它在干活。等到第一条
+    `summarize` 任务到达才崩，表现为「任务一直 pending、日志里一条 ImportError」，
+    而真正的原因（少装一个包）被埋在几十条抓取日志之后。
+
+    **为什么 import 的是 `kb.ai.client` 而不是 `kb.ai`**：`kb/ai/__init__.py`
+    刻意把 `AiClient` / `HttpxTransport` 做成惰性导出，好让纯函数单测
+    （`parse` / `validate` / `prompts`）在没装 `httpx` 的环境里也能跑（`E6`）。
+    所以「依赖是否齐全」这件事必须在**真实实现模块**上验，而不是包入口。
+
+    错误文案必须含**包名**与 `pip install httpx`：用户非技术背景，
+    「ImportError: No module named 'httpx'」对他是无信息量的一句话。
+    """
+    try:
+        import kb.ai.client  # noqa: F401 只验证可导入
+        import kb.ai.transport  # noqa: F401 同上
+    except ImportError as exc:
+        sys.stderr.write(
+            "\n[worker] AI 层缺少依赖：httpx\n"
+            f"  原始错误：{exc}\n"
+            "  修复：pip install httpx\n"
+            "  （安装后重启 worker；在此之前不会处理摘要任务，"
+            "已有条目保持待处理状态）\n\n"
+        )
+        sys.exit(2)
+
+
+def build_ai_client() -> Any:
+    """构造真实 AI 客户端。**配置是否齐备在每轮任务里现判**，不在启动时判。
+
+    启动时判会把「未配置」变成一个启动错误，而 `AI-04` 要求的是
+    「内容照常入库、不报错、不发请求」——用户可能后补配置（`E4`）。
+    所以这里无条件构造客户端，把「该不该调用」留给 `steps.run_summarize`。
+    """
+    from kb.ai import AiConfig, build_client
+
+    # 这里的 AiConfig 只是占位：真正的配置每轮从 `settings` 现读
+    # （`ai_runtime.load_config`），客户端持有的那份会被替换。
+    # 传给 `build_client` 是为了让装配有唯一入口，不在这里 new 实现类。
+    return build_client(AiConfig(base_url="", api_key="", model=""))
+
+
 # 心跳间隔。必须小于 api 侧 WORKER_STALE_AFTER（90 秒），
 # 否则 worker 明明在跑也会被报成 false。留 3 倍余量给偶发的慢抓取。
 HEARTBEAT_SECONDS = 30.0
@@ -104,6 +150,12 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
+    # B27：必须在写心跳、进循环之前就确认 AI 层可用。缺 httpx 时
+    # 早退一次，比「领到第一条任务才崩」好排障得多——后者表现为
+    # 任务一直 pending 而 health 报 workerOk:true。
+    ensure_ai_available()
+    ai_client = build_ai_client()
+
     pool = Pool(PgConfig.from_env())
     stop = threading.Event()
 
@@ -127,7 +179,9 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("worker 启动，idle=%.1fs 心跳=%.0fs", args.idle, HEARTBEAT_SECONDS)
     try:
-        run_forever(pool, default_extractor(), idle_seconds=args.idle)
+        run_forever(
+            pool, default_extractor(), idle_seconds=args.idle, ai_client=ai_client
+        )
     except KeyboardInterrupt:
         pass
     finally:
