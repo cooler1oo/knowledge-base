@@ -49,6 +49,16 @@ repos:
         entry: python -m tools.eng_checks --commit-msg
         language: system
         stages: [commit-msg]
+      # ruff format 默认只认 types: [python]，Markdown 里 ```python 代码块的排版
+      # 本地不查、CI 的 `ruff format --check .` 却查。2026-11-27 因此红过一次
+      # （1855d1b：交接包里的代码块注释对齐多两个空格），本地全绿 CI 红，
+      # 差别只在扫描范围。这条钩子把口径拉齐到 CI，改动任何 md 都跑一次。
+      - id: ruff-format-docs
+        name: 文档里的 Python 代码块格式（与 CI 同口径）
+        entry: ruff format --check .
+        language: system
+        files: \.md$
+        pass_filenames: false
       - id: prepush-clean
         name: 推送前工作区必须干净
         entry: python -m tools.eng_checks --pre-push
