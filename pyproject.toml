@@ -17,6 +17,11 @@ dependencies = [
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
+    # 抓取层是异步的，没有它 async def test_* 会报
+    # "async def functions are not natively supported" 而全部失败。
+    # 2026-11-27 CI 踩过：本地环境恰好装了 0.25.0 所以本地绿，
+    # CI 干净环境没装 → 11 个异步测试全挂。
+    "pytest-asyncio>=0.24",
     "ruff>=0.17",
     "mypy>=2",
     "pre-commit>=3.7",
