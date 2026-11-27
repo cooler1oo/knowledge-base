@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -49,13 +50,24 @@ def pytest_sessionfinish(session, exitstatus) -> None:
     """全绿的会话留一条痕迹，供 `tools.eng_checks --all` 判断「这份内容跑过测试」。
 
     记内容哈希而不是 commit：测试几乎总在提交前跑，提交后 HEAD 变了、内容没变。
-    写失败不影响测试结果——留痕是附加信息，不该让绿灯变红。
+    **只认全量运行**（命令行没带路径）：否则跑一个测试文件也会留痕，--all 就以为
+    整库验证过了，这条检查等于没写。
+    写失败不影响测试结果：留痕是附加信息，不该让绿灯变红。
     """
     if exitstatus != 0:
         return
+    # 裸跑 `pytest` 时 config.args 会被 ini 的 testpaths 填上（实测是 ["tests"]），
+    # 所以不能判空；改成「位置参数集合 == testpaths 集合」才算全量。
+    positional = {
+        Path(a).as_posix() for a in session.config.args if not str(a).startswith("-")
+    }
+    wanted = {
+        Path(t).as_posix() for t in (session.config.getini("testpaths") or ["tests"])
+    }
+    if positional and positional != wanted:
+        return
     try:
         from datetime import datetime, timezone
-        from pathlib import Path
 
         from tools.eng_checks import git_rules
 
