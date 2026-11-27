@@ -159,31 +159,27 @@ MARKER_REL = Path(".pytest_cache") / "kb-last-green.json"
 
 
 def working_tree_hash(root: Path | None = None) -> str:
-    """当前工作区内容的哈希。
+    """工作区内容的哈希：按「路径+内容」算，与有没有提交无关。
 
-    干净时取 HEAD 的 tree；有改动时给脏树拍快照（`git stash create` 只造对象，
-    不动索引与工作区）。`stash create` 不包含未跟踪文件，所以额外把未跟踪文件名
-    也拌进哈希——否则「新建一个源文件」不会让留痕失效。
+    试过 `git stash create` 的 tree，有两个误判：不含未跟踪文件；且同一份内容在
+    「未跟踪」与「已提交」两种状态下算出的值不同，于是每次提交后留痕都失效。
+    改为直接读工作区文件——集合取 `git ls-files` 加未跟踪文件，提交前后一致。
     """
-    if not _git("status", "--porcelain", cwd=root).strip():
-        tree = _git("rev-parse", "HEAD^{tree}", cwd=root).strip()
-    else:
-        snapshot = _git("stash", "create", cwd=root).strip()
-        if not snapshot:
-            return ""
-        tree = _git("rev-parse", f"{snapshot}^{{tree}}", cwd=root).strip()
+    base = Path(root) if root is not None else Path.cwd()
+    tracked = _git("ls-files", cwd=root).splitlines()
+    others = _git("ls-files", "--others", "--exclude-standard", cwd=root).splitlines()
+    paths = sorted({p for p in [*tracked, *others] if p.strip()})
 
-    untracked = sorted(
-        line
-        for line in _git(
-            "ls-files", "--others", "--exclude-standard", cwd=root
-        ).splitlines()
-        if line.strip()
-    )
-    if not untracked:
-        return tree
-    extra = hashlib.sha256("\n".join(untracked).encode("utf-8")).hexdigest()[:12]
-    return f"{tree}+{extra}"
+    digest = hashlib.sha256()
+    for rel in paths:
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            digest.update((base / rel).read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def write_last_green(marker: Path, tree: str, at: datetime) -> None:
