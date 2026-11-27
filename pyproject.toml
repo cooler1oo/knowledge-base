@@ -3,7 +3,15 @@ name = "knowledge-base"
 version = "0.1.0"
 description = "个人知识库：需求、设计、技术方案，以及约束这些文档的自动检查"
 requires-python = ">=3.11"
-dependencies = ["pg8000>=1.31", "starlette>=1.0", "uvicorn>=0.30", "bcrypt>=5.0"]
+dependencies = [
+    "pg8000>=1.31",
+    "starlette>=1.0",
+    "uvicorn>=0.30",
+    "bcrypt>=5.0",
+    # 抓取层主选。锁 2.4.x：2.4.4 是 R0 在平板上实测可用的版本，
+    # 大版本升级要重跑 R3 的真机抓取测试（抖音解析器改版风险高，见技术方案 §4.8）
+    "parsehub>=2.4.4,<2.5",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -29,11 +37,16 @@ pythonpath = ["."]
 testpaths = ["tests"]
 # -ra：跳过与失败的原因始终打印。缺了它，一次「全跳过」在 -q 下只剩
 # 16 个 s，看不出为什么，等于把事故藏起来（2026-11-26 真踩过）。
-addopts = "-ra"
+addopts = "-ra -m 'not external'"
 markers = [
     "slow: 慢检查，PR 上不跑，合进 main 之后跑",
     "pg: 需要真实 Postgres，未设置 KB_PG_* 时自动 skip",
+    "external: 需要真实外网与第三方站点可用性，默认不跑；用 -m external 显式跑",
 ]
+# 这两个必须放在 ini_options 里：写成 [tool.pytest_asyncio] 是读不到的
+# （2026-11-27 踩过，警告一直在但测试照样绿，容易被忽略）。
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 88
