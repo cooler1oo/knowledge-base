@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from tools.eng_checks import arch, git_rules
@@ -123,3 +125,72 @@ def test_size_limit_can_be_explicitly_bypassed(monkeypatch):
 
 def test_normal_commit_size_passes():
     assert git_rules.check_commit_size(3, 120) == []
+
+
+# ── 架构规则的声明式配置 ──────────────────────────────────────
+
+
+def test_rules_can_allow_write_sql_for_another_layer():
+    """规则是配置：把允许前缀改成 kb/api/ 后，api 里写库就不再违规。"""
+    rules = {
+        "write_sql_allowed_prefixes": ["kb/api/"],
+        "import_deny": [],
+    }
+    source = 'conn.run("delete from items where id = 1")\n'
+    assert arch.check_file("kb/api/app.py", source, rules) == []
+
+
+def test_tighter_rules_still_flag_original_targets():
+    rules = {"write_sql_allowed_prefixes": ["kb/api/"], "import_deny": []}
+    source = 'conn.run("delete from items where id = 1")\n'
+    assert [v.rule for v in arch.check_file("kb/store/items.py", source, rules)] == [
+        "只有 store 能写库"
+    ]
+
+
+def test_load_rules_reads_toml(tmp_path):
+    cfg = tmp_path / "layer_rules.toml"
+    cfg.write_text(
+        'dirs = ["kb"]\n'
+        'write_sql_allowed_prefixes = ["kb/db/"]\n'
+        "[[import_deny]]\n"
+        'path_prefix = "kb/web/"\n'
+        'layer = "Web 层"\n'
+        'modules = ["kb.store"]\n',
+        encoding="utf-8",
+    )
+    rules = arch.load_rules(cfg)
+    assert rules["write_sql_allowed_prefixes"] == ["kb/db/"]
+    assert rules["import_deny"][0]["layer"] == "Web 层"
+
+
+def test_load_rules_falls_back_when_missing(tmp_path):
+    assert arch.load_rules(tmp_path / "nope.toml") == arch.DEFAULT_RULES
+
+
+# ── 「测试跑过」的留痕 ────────────────────────────────────────
+
+
+def test_missing_marker_blocks_delivery(tmp_path):
+    problems = git_rules.check_last_green(tmp_path / "marker.json", "abc")
+    assert [p.rule for p in problems] == ["没跑过测试"]
+
+
+def test_stale_marker_blocks_delivery(tmp_path):
+    marker = tmp_path / "marker.json"
+    git_rules.write_last_green(marker, "old-tree", datetime.now(timezone.utc))
+    problems = git_rules.check_last_green(marker, "new-tree")
+    assert [p.rule for p in problems] == ["测试不是这份内容跑的"]
+
+
+def test_matching_marker_passes(tmp_path):
+    marker = tmp_path / "marker.json"
+    git_rules.write_last_green(marker, "same-tree", datetime.now(timezone.utc))
+    assert git_rules.check_last_green(marker, "same-tree") == []
+
+
+def test_corrupt_marker_is_treated_as_missing(tmp_path):
+    marker = tmp_path / "marker.json"
+    marker.write_text("{不是 json", encoding="utf-8")
+    problems = git_rules.check_last_green(marker, "abc")
+    assert [p.rule for p in problems] == ["没跑过测试"]

@@ -12,10 +12,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 SUBJECT_RE = re.compile(
     r"^(feat|fix|docs|test|refactor|chore|ci|perf|build|revert)(\([\w.\-/]+\))?: \S.{2,}$"
@@ -37,13 +41,14 @@ class Problem:
         return f"[{self.rule}] {self.detail}"
 
 
-def _git(*args: str) -> str:
+def _git(*args: str, cwd: Path | None = None) -> str:
     result = subprocess.run(
         ["git", *args],
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
+        cwd=str(cwd) if cwd else None,
     )
     if result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} 失败：{result.stderr.strip()}")
@@ -141,4 +146,74 @@ def check_pushed() -> list[Problem]:
         ]
     if ahead:
         return [Problem("有未推送提交", f"{ahead} 个提交只在本地，git push")]
+    return []
+
+
+# ── 「测试跑过」的留痕 ───────────────────────────────────────
+#
+# 为什么记内容哈希而不是 commit 号：测试几乎总是在提交之前跑，提交之后 HEAD 变了
+# 但内容没变。用 commit 号比对会让这条检查每次都红，等于废掉。git 的 tree 哈希
+# 正好是「这批文件的内容」，提交不改内容，所以比对能对上。
+
+MARKER_REL = Path(".pytest_cache") / "kb-last-green.json"
+
+
+def working_tree_hash(root: Path | None = None) -> str:
+    """当前工作区内容的哈希。
+
+    干净时取 HEAD 的 tree；有改动时给脏树拍快照（`git stash create` 只造对象，
+    不动索引与工作区）。`stash create` 不包含未跟踪文件，所以额外把未跟踪文件名
+    也拌进哈希——否则「新建一个源文件」不会让留痕失效。
+    """
+    if not _git("status", "--porcelain", cwd=root).strip():
+        tree = _git("rev-parse", "HEAD^{tree}", cwd=root).strip()
+    else:
+        snapshot = _git("stash", "create", cwd=root).strip()
+        if not snapshot:
+            return ""
+        tree = _git("rev-parse", f"{snapshot}^{{tree}}", cwd=root).strip()
+
+    untracked = sorted(
+        line
+        for line in _git(
+            "ls-files", "--others", "--exclude-standard", cwd=root
+        ).splitlines()
+        if line.strip()
+    )
+    if not untracked:
+        return tree
+    extra = hashlib.sha256("\n".join(untracked).encode("utf-8")).hexdigest()[:12]
+    return f"{tree}+{extra}"
+
+
+def write_last_green(marker: Path, tree: str, at: datetime) -> None:
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        json.dumps({"tree": tree, "at": at.isoformat()}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def read_last_green(marker: Path) -> dict[str, str] | None:
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def check_last_green(marker: Path, current_tree: str) -> list[Problem]:
+    """交付前必须有「当前这份内容跑过测试且全绿」的记录。"""
+    data = read_last_green(marker)
+    if not data:
+        return [Problem("没跑过测试", "先跑 python -m pytest，绿灯之后才算做完")]
+    if not current_tree:
+        return [Problem("取不到内容哈希", "确认在 git 仓库里执行")]
+    if data.get("tree") != current_tree:
+        return [
+            Problem(
+                "测试不是这份内容跑的",
+                "自上次绿灯之后内容变过，重跑 python -m pytest",
+            )
+        ]
     return []

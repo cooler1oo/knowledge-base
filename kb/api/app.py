@@ -10,12 +10,14 @@ R2 只实现 §8.1 端点表里的 4 个（bootstrap / login / logout / health�
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import pg8000.native
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
@@ -87,7 +89,7 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
     cfg = config or AppConfig.from_env()
 
     @asynccontextmanager
-    async def lifespan(_app: Starlette):
+    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
         # 启动时清一次过期会话：单用户不会有回收压力，顺手做掉
         try:
             with pool.connection() as conn:
@@ -156,7 +158,9 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
         return response
 
     class SessionMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request: Request, call_next):
+        async def dispatch(
+            self, request: Request, call_next: RequestResponseEndpoint
+        ) -> Response:
             request.state.username = None
             if request.url.path in PUBLIC_PATHS:
                 return await call_next(request)
@@ -189,7 +193,7 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
     )
 
 
-def _username_of(conn, session_id: int) -> str:
+def _username_of(conn: pg8000.native.Connection, session_id: int) -> str:
     """会话表里没有 username（单用户），直接取库里唯一那个账号。"""
     rows = conn.run("select username from users order by id limit 1")
     return str(rows[0][0]) if rows else ""

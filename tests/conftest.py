@@ -43,3 +43,26 @@ def pg_test_config_or_skip() -> PgConfig:
 @pytest.fixture(scope="session")
 def pg_cfg() -> PgConfig:
     return pg_test_config_or_skip()
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:
+    """全绿的会话留一条痕迹，供 `tools.eng_checks --all` 判断「这份内容跑过测试」。
+
+    记内容哈希而不是 commit：测试几乎总在提交前跑，提交后 HEAD 变了、内容没变。
+    写失败不影响测试结果——留痕是附加信息，不该让绿灯变红。
+    """
+    if exitstatus != 0:
+        return
+    try:
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        from tools.eng_checks import git_rules
+
+        tree = git_rules.working_tree_hash()
+        if tree:
+            git_rules.write_last_green(
+                Path(git_rules.MARKER_REL), tree, datetime.now(timezone.utc)
+            )
+    except Exception:
+        pass

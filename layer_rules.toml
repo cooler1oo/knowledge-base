@@ -1,0 +1,19 @@
+# 架构边界规则（声明式）。执行器：python -m tools.eng_checks --arch
+# 换项目只改这个文件，执行器不动。
+
+# 扫哪些目录（相对仓库根）
+dirs = ["kb", "tools", "scripts"]
+
+# 只有这些前缀下的文件可以出现写库 SQL；其余一律拦
+write_sql_allowed_prefixes = ["kb/store/"]
+
+# 这些层不得 import 数据库层
+[[import_deny]]
+path_prefix = "kb/extract/"
+layer = "抓取层"
+modules = ["kb.store"]
+
+[[import_deny]]
+path_prefix = "kb/ai/"
+layer = "AI 层"
+modules = ["kb.store"]

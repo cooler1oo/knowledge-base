@@ -113,8 +113,12 @@ demo/            可交互原型
 | 文档规矩（禁用词、命名、复用调研） | `python -m tools.doc_checks` | ① ② ③ |
 | 行为回归与覆盖率底线 | `pytest --cov`（阈值在 `[tool.coverage.report]`） | ③ |
 
-**交付前一条命令自检**：`python -m tools.eng_checks --all`（架构 + 工作区干净 + 已推送）。
-**本地全量**：`python -m pytest -q` + `python -m tools.doc_checks --all`。
+**交付前一条命令自检**：`python -m tools.eng_checks --all`（架构 + 工作区干净 + 已推送 + **当前内容跑过测试**）。
+其中「跑过测试」由 `tests/conftest.py` 在会话全绿时写入 `.pytest_cache/kb-last-green.json`（记内容哈希，不是 commit 号），
+`--all` 比对哈希：内容变过就要求重跑。**本地全量**：`python -m pytest -q` + `python -m tools.doc_checks --all`。
+
+**架构规则是声明式的**：改 `layer_rules.toml`（扫哪些目录、哪层允许写库、哪层禁 import 数据库），
+执行器 `tools/eng_checks/arch.py` 不动。
 
 想加一条规矩，先问：能不能变成机器检查？能，就写进上面这张表的对应工具里，**不写成正文条款**。
 

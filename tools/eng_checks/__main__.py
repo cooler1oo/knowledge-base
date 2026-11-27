@@ -65,6 +65,12 @@ def main(argv: list[str] | None = None) -> int:
     problems += arch.scan(ROOT)
     problems += git_rules.check_worktree_clean()
     problems += git_rules.check_pushed()
+    try:
+        tree = git_rules.working_tree_hash(ROOT)
+    except RuntimeError as exc:
+        problems.append(git_rules.Problem("取不到内容哈希", str(exc)))
+    else:
+        problems += git_rules.check_last_green(ROOT / git_rules.MARKER_REL, tree)
     return _report(problems, "交付前自检")
 
 
