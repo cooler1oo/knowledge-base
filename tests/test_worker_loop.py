@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kb.extract.normalize import ExtractResult, MediaItem
 from kb.extract.router import ExtractOutcome
 from kb.worker import loop
@@ -129,6 +131,28 @@ def _fetch_job(item_url: str = "https://v.douyin.com/abc/") -> list[object]:
     return [[1, 7, "fetch", 0, "running"]]
 
 
+class _FakeSummarizer:
+    """最小假 AI 客户端，只为了断言「有没有被调用」。
+
+    `calls` 是**普通实例属性**而不是 property，也不是 `MagicMock`：
+    `MagicMock` 对任何属性访问都返回新 Mock，`calls == 0` 在「从未被调用」
+    与「被调用了但没设返回值」两种情况下都能通过（设计 §6.9）。
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.seen: list[tuple[str, str, tuple]] = []
+
+    def summarize(
+        self, title: str, text: str, vocabulary: tuple[tuple[int, str, str], ...] = ()
+    ) -> object:
+        self.calls += 1
+        self.seen.append((title, text, vocabulary))
+        from kb.ai.outcomes import SummarizeOk
+
+        return SummarizeOk(summary="这是一段足够长的中文摘要内容")
+
+
 # ── 正常路径 ──────────────────────────────────────────────────
 
 
@@ -220,15 +244,21 @@ def test_抓取器抛异常时异常类型要进_error_():
 
 
 # ── 未实现的步骤 ──────────────────────────────────────────────
+#
+# `summarize` 与 `tag` 已在本轮实现（进 `SUPPORTED_STEPS`），所以这两条用例的
+# 前提消失了。改用 `ocr`——它仍是未实现步骤（AI-10 明说不入队这两个步骤）。
+#
+# 为什么不直接删掉这两条：「未实现步骤不能假装完成」是一条长期有效的约束，
+# 下一轮实现 `ocr` 时它还要守门。删掉等于把这条规则从测试里抹去。
 
 
-def test_未实现的步骤不假装完成_标回_pending_并说明():
-    """summarize/ocr/tag/index 在 R5 之后才有。
+def test_未实现的步骤不再假装完成_标回pending并说明():
+    """`ocr` / `index` 在后续轮次才有。
 
     现在领到就标 done 是谎报——条目会显示「已完成」但摘要标签都是空的。
     正确做法：标回 pending + 写明原因，等后续轮次接上。
     """
-    conn = _ScriptedConn([[[2, 8, "summarize", 0, "running"]]])
+    conn = _ScriptedConn([[[2, 8, "ocr", 0, "running"]]])
 
     handled = loop.run_once(_as_pool(_Pool(conn)), _Extractor())
 
@@ -239,14 +269,50 @@ def test_未实现的步骤不假装完成_标回_pending_并说明():
     assert any("尚未实现" in e for e in errors), f"没说明原因：{errors}"
 
 
-def test_未实现步骤不去调抓取器():
-    """summarize 阶段没有 URL 可抓，调了只会白费一次网络往返。"""
+def test_未实现步骤不去调抓取器也不调AI客户端():
+    """`ocr` 阶段既没有 URL 可抓，也不该调 AI 客户端。
+
+    `ai_client.calls == 0` 这条顺带成为「未支持步骤不消耗 AI 调用」的守门用例——
+    `ocr` 若哪天被误加进 `SUPPORTED_STEPS` 并把 `ai_client` 传进去，
+    这条会立刻红。
+    """
+    conn = _ScriptedConn([[[2, 8, "ocr", 0, "running"]]])
+    extractor = _Extractor()
+    ai_client = _FakeSummarizer()
+
+    loop.run_once(_as_pool(_Pool(conn)), extractor, ai_client)
+
+    assert extractor.calls == []
+    assert ai_client.calls == 0, "未支持的步骤不得消耗 AI 调用"
+
+
+def test_summarize步骤不调抓取器_C3():
+    """`summarize` 是已实现步骤，**更**不该调抓取器。
+
+    这条比「未实现步骤不调抓取器」更强：未实现步骤只是不该调；
+    `summarize` 是**没有 URL 可抓**，调了等于白费一次网络往返。
+    这是 AI-11 修复后本轮更需要保留的意图。
+    """
     conn = _ScriptedConn([[[2, 8, "summarize", 0, "running"]]])
     extractor = _Extractor()
 
     loop.run_once(_as_pool(_Pool(conn)), extractor)
 
     assert extractor.calls == []
+
+
+def test_summarize步骤不会因为url为空被写成无链接可抓_AI_11():
+    """AI-11：URL 判空只对 `fetch` 生效。
+
+    修 AI-11 之前，`summarize` 加进 `SUPPORTED_STEPS` 会让纯文字条目
+    命中「无链接可抓」并被标 `done`——摘要没写、状态显示已完成（谎报）。
+    """
+    conn = _ScriptedConn([[[2, 8, "summarize", 0, "running"]]], item_url=None)
+
+    loop.run_once(_as_pool(_Pool(conn)), _Extractor())
+
+    errors = [str(p.get("e")) for p in conn.params if "e" in p]
+    assert not any("无链接可抓" in e for e in errors), f"命中了 URL 判空分支：{errors}"
 
 
 # ── 连接归还 ──────────────────────────────────────────────────
@@ -258,3 +324,146 @@ def test_每条任务都从池里取连接():
     loop.run_once(_as_pool(pool), _Extractor())
 
     assert pool.acquired == 1, "没从池里取连接，可能用了全局连接"
+
+
+# ── 分派阶段的兜底异常 ────────────────────────────────────────
+
+
+class _BrokenStepConn(_ScriptedConn):
+    """让某个步骤的实现抛异常，验证 `run_once` 的兜底。"""
+
+    def run(self, sql: str, **params: object) -> list[list[object]]:
+        result = super().run(sql, **params)
+        # 走到 mark_done（步骤实现的第一步写库操作之一）时抛
+        if "state = 'done'" in sql.lower():
+            raise RuntimeError("库挂了")
+        return result
+
+
+def test_步骤实现抛异常时收成任务失败不得让循环崩掉():
+    """`steps.*` 内部未捕获的异常必须在 `run_once` 收掉。
+
+    这条守的是「单条坏数据不能打死整个 worker」——与抓取器抛异常那条
+    （`test_抓取器抛异常不得让循环崩掉`）同一个理由，只是发生在分派层。
+    少了这层兜底，一次 `KeyError` 会让剩余队列永远没人处理。
+    """
+    conn = _BrokenStepConn([_fetch_job()])
+
+    handled = loop.run_once(_as_pool(_Pool(conn)), _Extractor(ok=True))
+
+    assert handled is True, "异常应该被收成失败，而不是抛出去"
+    errors = [str(p.get("e")) for p in conn.params if "e" in p]
+    assert any("RuntimeError" in e for e in errors), f"异常类型没记录：{errors}"
+
+
+# ── run_forever 的循环行为 ────────────────────────────────────
+
+
+def test_run_forever_把_ai_client_透传给_run_once():
+    """`run_forever` 是唯一把 `ai_client` 传到 `run_once` 的地方。
+
+    这条挡住「`__main__` 构造了客户端但忘了透传」——那种情况下
+    worker 会一直走「AI 客户端未装配」的推迟分支，而日志里看不出问题。
+    """
+    seen: list[object] = []
+    client = _FakeSummarizer()
+
+    class _Stopping(BaseException):
+        """继承 `BaseException` 而不是 `Exception`。
+
+        `run_forever` 用 `except Exception` 兜住 `on_tick` 的失败（心跳写库
+        失败不该影响干活），所以用普通 Exception 做「跳出循环」的信号会被
+        它吞掉，测试直接挂死。
+        """
+
+    def _on_tick() -> None:
+        raise _Stopping
+
+    original = loop.run_once
+
+    def _spy(pool: object, extractor: object, ai_client: object = None) -> bool:
+        seen.append(ai_client)
+        return False
+
+    loop.run_once = _spy  # type: ignore[assignment]
+    try:
+        with pytest.raises(_Stopping):
+            loop.run_forever(
+                _as_pool(_Pool(_ScriptedConn([]))),
+                _Extractor(),
+                idle_seconds=0.0,
+                on_tick=_on_tick,
+                ai_client=client,
+            )
+    finally:
+        loop.run_once = original  # type: ignore[assignment]
+
+    assert seen == [client], f"ai_client 没被透传：{seen}"
+
+
+def test_run_forever_单轮异常不退出循环():
+    """数据库级异常记一笔再继续，不让进程退出（模块 docstring 的约束）。"""
+    ticks: list[int] = []
+
+    class _Stopping(BaseException):
+        """继承 `BaseException` 而不是 `Exception`。
+
+        `run_forever` 用 `except Exception` 兜住 `on_tick` 的失败（心跳写库
+        失败不该影响干活），所以用普通 Exception 做「跳出循环」的信号会被
+        它吞掉，测试直接挂死。
+        """
+
+    def _on_tick() -> None:
+        ticks.append(1)
+        if len(ticks) >= 3:
+            raise _Stopping
+
+    def _boom(*_args: object, **_kwargs: object) -> bool:
+        raise RuntimeError("库连不上")
+
+    original = loop.run_once
+    loop.run_once = _boom  # type: ignore[assignment]
+    try:
+        with pytest.raises(_Stopping):
+            loop.run_forever(
+                _as_pool(_Pool(_ScriptedConn([]))),
+                _Extractor(),
+                idle_seconds=0.0,
+                on_tick=_on_tick,
+            )
+    finally:
+        loop.run_once = original  # type: ignore[assignment]
+
+    assert len(ticks) == 3, "单轮异常让循环提前退出了"
+
+
+def test_run_forever_心跳失败不影响干活():
+    """心跳写失败不该让 worker 停止处理任务。"""
+    ticks: list[int] = []
+
+    class _Stopping(BaseException):
+        """继承 `BaseException` 而不是 `Exception`。
+
+        `run_forever` 用 `except Exception` 兜住 `on_tick` 的失败（心跳写库
+        失败不该影响干活），所以用普通 Exception 做「跳出循环」的信号会被
+        它吞掉，测试直接挂死。
+        """
+
+    def _on_tick() -> None:
+        ticks.append(1)
+        if len(ticks) >= 2:
+            raise _Stopping
+        raise RuntimeError("心跳写库失败")
+
+    try:
+        with pytest.raises(_Stopping):
+            loop.run_forever(
+                _as_pool(_Pool(_ScriptedConn([]))),
+                _Extractor(),
+                idle_seconds=0.0,
+                on_tick=_on_tick,
+            )
+    finally:
+        pass
+
+    assert len(ticks) == 2, "心跳失败让循环退出了"

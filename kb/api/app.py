@@ -26,6 +26,7 @@ from kb.store import accounts
 from kb.store import items as items_store
 from kb.store.db import Pool
 
+from . import ai as ai_api
 from . import auth, health, pages
 from . import items as items_api
 
@@ -191,6 +192,9 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
         Route("/", home),
         Route("/login", login_page),
         Route("/api/health", api_health),
+        # AI 用量（D15/D18）。**刻意不加入 PUBLIC_PATHS**：不在白名单里即自动
+        # 走会话中间件，未登录返回 401 而不是 200 空对象——用量属敏感信息。
+        Route("/api/ai/usage", ai_api.usage(pool)),
         Route("/api/items", items_api.create_or_list(pool), methods=["POST", "GET"]),
         Route("/api/items/{item_id:int}", items_api.detail(pool)),
         Route("/api/auth/bootstrap", api_bootstrap, methods=["POST"]),
