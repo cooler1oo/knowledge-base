@@ -167,7 +167,14 @@ def _prd_priorities() -> dict[str, str]:
 
 
 def check_p0_coverage() -> list[Violation]:
-    """AGENTS.md 第七节第 1 条：PRD 每条 P0 必须在方案里出现。"""
+    """AGENTS.md 第七节第 1 条：PRD 每条 P0 必须在方案里出现。
+
+    没有 PRD 的项目（新建仓库）直接放行：这条规则的前提是「有 PRD」，
+    前提不存在就报错，等于让每个新项目一提交文档就被拦住。
+    """
+    prd_dir = DOC_ROOT / "prd"
+    if not prd_dir.is_dir() or not any(prd_dir.glob("*.md")):
+        return []
     prio = _prd_priorities()
     p0 = sorted(k for k, v in prio.items() if v == "P0")
     if not p0:
