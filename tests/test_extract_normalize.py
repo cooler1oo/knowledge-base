@@ -107,19 +107,89 @@ def test_media_为_None_时不崩():
     assert result.media == []
 
 
-# ── duration 换算（毫秒 → 秒）──────────────────────────────────
+# ── duration 换算：单位因平台而异 ─────────────────────────────
+#
+# 2026-11-27 实测发现上游库自身不一致，这是本模块最容易写错的地方：
+#
+#   抖音   duration = 445071   整数，**毫秒**  （按秒解释是 123.6 小时，不可能）
+#   B站    duration = 302.934  浮点，**秒**    （ParseHub 注释说「秒」对 B站 成立）
+#
+# 也就是说「所有平台都是毫秒」是错的，「所有平台都是秒」也是错的。
+# 判据是数值本身：真实视频不可能超过约 12 小时（43200 秒 = 43200000 毫秒），
+# 所以毫秒值一定 ≥ 43200000 量级。用这个下界区分，比按平台名硬编码可靠——
+# 平台名会变，数值量级不会。
 
 
-def test_时长从毫秒换算成秒():
-    """实测 duration=445071。这是毫秒：按秒解释是 123.6 小时，不可能。
-
-    写库用 `props.duration_sec`，不换算会把 7 分钟的视频记成 5 天。
-    """
+def test_抖音毫秒值要换算成秒():
+    """实测 duration=445071 是毫秒。不换算会把 7 分钟视频记成 5 天。"""
     from kb.extract.normalize import normalize_payload
 
     result = normalize_payload(load("douyin_video"))
 
     assert result.media[0].duration_sec == 445
+
+
+def test_B站秒值不换算_浮点取整():
+    """实测 B站 duration=302.934，单位就是秒。再除以 1000 会变成 0。
+
+    浮点必须能收：上一版 `_as_int` 对 float 返回 None，导致 B站 时长整条丢失。
+    """
+    from kb.extract.normalize import normalize_payload
+
+    payload = {
+        "platform": "bilibili",
+        "type": "video",
+        "title": "B站视频",
+        "content": "",
+        "raw_url": "https://www.bilibili.com/video/BV1esyZz7ExF",
+        "media": {
+            "url": "https://example.invalid/v.mp4",
+            "ext": "mp4",
+            "duration": 302.934,
+        },
+    }
+    result = normalize_payload(payload)
+
+    assert result.media[0].duration_sec == 302
+
+
+def test_B站第二条秒值也要正确():
+    """第二条实测 214.738。单条通过不算通过。"""
+    from kb.extract.normalize import normalize_payload
+
+    payload = {
+        "platform": "bilibili",
+        "type": "video",
+        "title": "t",
+        "content": "",
+        "raw_url": "https://www.bilibili.com/video/BV1oSyJz1EiC",
+        "media": {
+            "url": "https://example.invalid/v.mp4",
+            "ext": "mp4",
+            "duration": 214.738,
+        },
+    }
+    assert normalize_payload(payload).media[0].duration_sec == 214
+
+
+def test_短视频的毫秒值也不能被误判成秒():
+    """边界：3 秒的抖音短视频 = 3000 毫秒。若阈值设得太高（比如 10000），
+    它会走「当秒处理」分支变成 3000 秒 = 50 分钟。这条钉住下界要够低。"""
+    from kb.extract.normalize import normalize_payload
+
+    payload = {
+        "platform": "douyin",
+        "type": "video",
+        "title": "三秒视频",
+        "content": "",
+        "raw_url": "https://example.invalid/x",
+        "media": {
+            "url": "https://example.invalid/v.mp4",
+            "ext": "mp4",
+            "duration": 3000,
+        },
+    }
+    assert normalize_payload(payload).media[0].duration_sec == 3
 
 
 def test_图文没有时长字段_给_None_而不是_0():
