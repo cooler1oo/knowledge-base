@@ -14,7 +14,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import pg8000.native
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -171,7 +170,7 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
                         session = accounts.find_session(conn, auth.hash_token(raw))
                         if session:
                             accounts.touch_session(conn, session[0], session[1])
-                            request.state.username = _username_of(conn, session[0])
+                            request.state.username = accounts.first_username(conn)
                 except Exception:
                     pass  # 库出问题时按未登录处理，由健康检查暴露
             if request.state.username:
@@ -191,9 +190,3 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
     return Starlette(
         routes=routes, middleware=[Middleware(SessionMiddleware)], lifespan=lifespan
     )
-
-
-def _username_of(conn: pg8000.native.Connection, session_id: int) -> str:
-    """会话表里没有 username（单用户），直接取库里唯一那个账号。"""
-    rows = conn.run("select username from users order by id limit 1")
-    return str(rows[0][0]) if rows else ""

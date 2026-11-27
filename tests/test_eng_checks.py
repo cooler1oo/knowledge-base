@@ -235,3 +235,23 @@ def test_wrong_shaped_rules_are_rejected(tmp_path, body):
     bad.write_text(body, encoding="utf-8")
     with pytest.raises(arch.RuleConfigError):
         arch.load_rules(bad)
+
+
+# ── 直连数据库驱动 ────────────────────────────────────────────
+
+
+DRIVER_RULES = {
+    "write_sql_allowed_prefixes": ["kb/store/"],
+    "import_deny": [],
+    "driver_deny": [{"modules": ["pg8000"], "allowed_prefixes": ["kb/store/"]}],
+}
+
+
+def test_api_must_not_import_db_driver():
+    problems = arch.check_file("kb/api/app.py", "import pg8000.native\n", DRIVER_RULES)
+    assert [p.rule for p in problems] == ["不得直连数据库驱动"]
+
+
+def test_store_may_import_db_driver():
+    problems = arch.check_file("kb/store/db.py", "import pg8000.native\n", DRIVER_RULES)
+    assert problems == []

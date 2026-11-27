@@ -17,3 +17,9 @@ modules = ["kb.store"]
 path_prefix = "kb/ai/"
 layer = "AI 层"
 modules = ["kb.store"]
+
+# 谁都不许绕过 store 直连数据库驱动。api 层今天只 import kb.store.db.Pool，
+# 一旦有人图省事直接 import pg8000，store 这层边界就形同虚设。
+[[driver_deny]]
+modules = ["pg8000", "psycopg", "psycopg2", "sqlite3"]
+allowed_prefixes = ["kb/store/"]

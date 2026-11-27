@@ -99,3 +99,13 @@ def purge_expired(conn: pg8000.native.Connection) -> int:
     """清掉过期会话。启动时跑一次即可，单用户不会有回收压力。"""
     rows = conn.run("delete from sessions where expires_at <= now() returning id")
     return len(rows)
+
+
+def first_username(conn: pg8000.native.Connection) -> str:
+    """库里唯一那个账号的名字。会话表不存 username（单用户），所以由这里补。
+
+    放在 store 而不是 api：api 一碰 `pg8000.native.Connection` 这个类型就得
+    import 驱动，等于把数据库边界捅穿了。
+    """
+    rows = conn.run("select username from users order by id limit 1")
+    return str(rows[0][0]) if rows else ""

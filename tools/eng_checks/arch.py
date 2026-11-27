@@ -169,6 +169,24 @@ def check_file(
                             f"import 了 {module}；该层只处理文本，不碰数据库",
                         )
                     )
+    drivers = active.get("driver_deny", [])
+    if isinstance(drivers, list):
+        for rule in drivers:
+            if not isinstance(rule, dict):
+                continue
+            if _matches(rel_path, rule.get("allowed_prefixes")):
+                continue
+            modules = [str(m) for m in rule.get("modules", [])]
+            for lineno, module in _imports(tree):
+                if any(module == m or module.startswith(m + ".") for m in modules):
+                    out.append(
+                        Violation(
+                            rel_path,
+                            lineno,
+                            "不得直连数据库驱动",
+                            f"import 了 {module}；数据库访问只能经 store 层",
+                        )
+                    )
     return out
 
 
