@@ -32,7 +32,7 @@ def pg_test_config_or_skip() -> PgConfig:
     explicit = explicit_env()
     try:
         conn = connect(cfg.with_database("postgres"))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 任何连接异常转成跳过或失败
         detail = f"Postgres 不可达（{cfg.host}:{cfg.port}，用户 {cfg.user}）：{exc}"
         if explicit:
             pytest.fail(f"已显式设置 {'/'.join(explicit)}，视为承诺连库；{detail}")
@@ -76,5 +76,5 @@ def pytest_sessionfinish(session, exitstatus) -> None:
             git_rules.write_last_green(
                 Path(git_rules.MARKER_REL), tree, datetime.now(timezone.utc)
             )
-    except Exception:
+    except Exception:  # noqa: BLE001 任何连接异常转成跳过或失败
         pass

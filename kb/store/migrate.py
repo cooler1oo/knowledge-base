@@ -117,10 +117,10 @@ def apply_one(conn: pg8000.native.Connection, migration: Migration) -> None:
             v=migration.version,
         )
         conn.run("commit")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 rollback 失败不该掩盖原始错误
         try:
             conn.run("rollback")
-        except Exception:
+        except Exception:  # noqa: BLE001 rollback 失败不该掩盖原始错误
             pass
         raise MigrationError(f"{migration.name} 执行失败，已回滚：{exc}") from exc
 

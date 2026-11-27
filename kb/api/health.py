@@ -33,7 +33,7 @@ def db_ok(pool: Pool) -> bool:
     try:
         with pool.connection() as conn:
             return int(conn.run("select 1")[0][0]) == 1
-    except Exception:
+    except Exception:  # noqa: BLE001 健康探针不许抛，库挂=不可用
         return False
 
 
@@ -56,7 +56,7 @@ def worker_heartbeat_at(pool: Pool) -> datetime | None:
     try:
         with pool.connection() as conn:
             raw = settings.get_value(conn, WORKER_HEARTBEAT_KEY)
-    except Exception:
+    except Exception:  # noqa: BLE001 健康探针不许抛，库挂=不可用
         return None
     return parse_heartbeat(raw)
 

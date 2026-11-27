@@ -18,7 +18,7 @@ TEST_DATABASE = "kb_test"
 def _current_user() -> str:
     try:
         return getpass.getuser()
-    except Exception:  # 无 LOGNAME/USER 环境变量时的兜底
+    except (OSError, KeyError):  # 无 LOGNAME/USER 环境变量时的兜底
         return "postgres"
 
 

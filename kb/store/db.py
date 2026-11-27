@@ -103,5 +103,5 @@ class Pool:
 def _close_quietly(conn: pg8000.native.Connection) -> None:
     try:
         conn.close()
-    except Exception:
+    except Exception:  # noqa: BLE001 关连接失败不影响任何结果
         pass

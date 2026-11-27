@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
-from http.cookies import SimpleCookie
+from http.cookies import CookieError, SimpleCookie
 
 import bcrypt
 
@@ -67,7 +67,7 @@ def token_from_cookie_header(header: str | None) -> str | None:
     try:
         jar = SimpleCookie()
         jar.load(header)
-    except Exception:  # 畸形 Cookie 头不该让请求 500
+    except (CookieError, ValueError):  # 畸形 Cookie 头不该让请求 500
         return None
     morsel = jar.get(COOKIE_NAME)
     return morsel.value if morsel else None

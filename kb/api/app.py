@@ -62,7 +62,7 @@ def _error(message: str, status: int = 400) -> JSONResponse:
 async def _json_body(request: Request) -> dict:
     try:
         payload = await request.json()
-    except Exception:
+    except Exception:  # noqa: BLE001 启动清理/登录页/会话查找按降级处理，见各分支注释
         raise ValueError("请求体必须是 JSON")
     if not isinstance(payload, dict):
         raise ValueError("请求体必须是 JSON 对象")
@@ -93,7 +93,7 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
         try:
             with pool.connection() as conn:
                 accounts.purge_expired(conn)
-        except Exception:
+        except Exception:  # noqa: BLE001 启动清理/登录页/会话查找按降级处理，见各分支注释
             pass  # 库还没就绪时不该阻止服务起来，健康检查会如实反映
         yield
         pool.close_all()
@@ -104,7 +104,7 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
         try:
             with pool.connection() as conn:
                 needs_bootstrap = accounts.count_users(conn) == 0
-        except Exception:
+        except Exception:  # noqa: BLE001 启动清理/登录页/会话查找按降级处理，见各分支注释
             # 库暂时不可用时仍要能打开登录页，让用户看到界面而不是 500
             needs_bootstrap = False
         return HTMLResponse(pages.login_page(bootstrap=needs_bootstrap))
@@ -171,7 +171,7 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
                         if session:
                             accounts.touch_session(conn, session[0], session[1])
                             request.state.username = accounts.first_username(conn)
-                except Exception:
+                except Exception:  # noqa: BLE001 启动清理/登录页/会话查找按降级处理，见各分支注释
                     pass  # 库出问题时按未登录处理，由健康检查暴露
             if request.state.username:
                 return await call_next(request)
