@@ -231,3 +231,29 @@ def test_disk_free_gb_handles_missing_path(tmp_path):
     value = health.disk_free_gb(missing)
     assert isinstance(value, float)
     assert value >= 0.0
+
+
+def test_meili_ok_survives_non_object_json(monkeypatch):
+    """返回不是 JSON 对象时不许抛异常，否则健康检查会变成 500。
+
+    2026-11-27 由 mypy 的 warn_return_any 带出来：原实现直接 payload.get(...)，
+    返回数组时抛 AttributeError，而 except 里那几种都抓不到它。
+    """
+
+    class _Resp:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self) -> "_Resp":
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        health.urllib.request, "urlopen", lambda *_a, **_k: _Resp(b'["available"]')
+    )
+    assert health.meili_ok("http://127.0.0.1:7700") is False

@@ -53,6 +53,12 @@ check_untyped_defs = true
 # 函数必须写注解。不开这条时，新代码可以整篇不写类型而照样通过——
 # 「类型系统拦住空值漏判」就成了空话（2026-11-27 打开，代价 4 处已补）。
 disallow_untyped_defs = true
+# 半注解也要拦：`def f(x) -> int:` 这种只写返回值的，等于把参数类型交给 Any。
+disallow_incomplete_defs = true
+# 声明返回 bool 却把 Any 直接抛回去的，必须显式收口（2026-11-27 抓到 1 处真问题）。
+warn_return_any = true
+strict_equality = true
+warn_unused_configs = true
 no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true

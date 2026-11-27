@@ -45,7 +45,11 @@ def meili_ok(base_url: str, timeout: float = 1.5) -> bool:
             payload = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError, TimeoutError):
         return False
-    return payload.get("status") == "available"
+    # 先确认是对象再取字段：返回数组或裸字符串时 .get 会抛 AttributeError，
+    # 而上面那几个 except 抓不到它，健康检查会变成 500。
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("status")) == "available"
 
 
 def worker_heartbeat_at(pool: Pool) -> datetime | None:

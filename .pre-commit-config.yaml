@@ -18,9 +18,12 @@ repos:
         types: [python]
       - id: mypy
         name: mypy 类型检查
-        entry: mypy kb tools
-        language: python
-        additional_dependencies: ["mypy==2.4.1"]
+        # 必须用项目环境（language: system），不能用隔离环境：
+        # 隔离环境里只有 mypy，没有 bcrypt/starlette/pg8000，这些库会退化成 Any，
+        # 于是 `return bcrypt.hashpw(...).decode()` 被判「返回 Any」——假红。
+        # 2026-11-27 实测：本地（有 bcrypt，py.typed）通过，钩子隔离环境报 2 处。
+        entry: python -m mypy kb tools
+        language: system
         files: ^(kb|tools)/.*\.py$
         pass_filenames: false
       - id: arch-boundaries
