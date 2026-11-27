@@ -368,3 +368,95 @@ def _as_props(value: object) -> dict[str, object]:
 
 def item_jobs(conn: pg8000.native.Connection, item_id: int) -> list[dict[str, object]]:
     return jobs.rows(conn, item_id)
+
+
+# ── 抓取结果落库 ─────────────────────────────────────────────
+#
+# 参数为什么用扁平的结构化字段而不是直接收 `kb.extract.router.ExtractOutcome`：
+# store 层不该知道抓取层的类型存在。收 dict 与 list 让这一层只管「怎么存」，
+# 「抓到了什么」由 worker 负责翻译。这样换抓取实现时 store 一行都不用改。
+
+
+def apply_extract(
+    conn: pg8000.native.Connection,
+    item_id: int,
+    *,
+    ok: bool,
+    kind: str = "",
+    title: str = "",
+    content_text: str = "",
+    platform: str = "",
+    media: list[dict[str, object]] | None = None,
+    error: str = "",
+) -> None:
+    """把一次抓取的结果写回 items。
+
+    成功：更新 title / content_text / kind，并把媒体与时长合并进 props。
+    失败：**只补空标题 + 记 fetchError**，不动 kind。
+
+    为什么失败不改 kind：`kind='link'` 是入库时按「只有链接」定下的降级结果。
+    抓取失败时把它改成别的（比如 video），等于谎报抓到了东西；改回 link 又是空操作。
+    保持原值，让界面只靠 props.fetchError 显示「处理失败，可重试」。
+
+    为什么媒体不写 attachments：那张表要求 storage_key / mime / sha256 三者非空，
+    而这三样都要媒体真正下载后才有值。R5 只抓元数据不下载，硬写只能填 URL 冒充
+    storage_key——那会让将来的 /api/media 出现路径穿越风险。媒体信息先进 props，
+    等下载轮次（R8 之后）再转成正式附件。
+
+    props 用 `||` 合并而非整体覆盖：入库时已写入的字段（如分享文案）被抹掉是
+    静默数据丢失，不会报错。
+    """
+    media_list = media or []
+    media_urls = [str(m.get("url", "")) for m in media_list if m.get("url")]
+    media_props: dict[str, object] = {
+        "platform": platform,
+        "mediaCount": len(media_list),
+        "mediaUrls": media_urls,
+    }
+    # 第一个媒体的时长就是这条内容的时长（视频只有一条；图文没有）
+    first_duration = next(
+        (
+            m.get("durationSec")
+            for m in media_list
+            if isinstance(m.get("durationSec"), int)
+        ),
+        None,
+    )
+    if first_duration is not None:
+        # 写成字符串：items.duration_sec 是 props->>'duration_sec' 的生成列，
+        # 直接写 int 也能转型，但统一走字符串避免 (int)::text 的格式差异
+        media_props["duration_sec"] = str(first_duration)
+
+    if ok:
+        # 成功时显式删掉上次的 fetchError：`||` 只会覆盖同名键，不会删掉
+        # 这次没带的旧键。不删的话，重试成功后界面会一直显示「处理失败」。
+        media_props.pop("fetchError", None)
+        conn.run(
+            "update items set "
+            " title = :t, "
+            " content_text = :ct, "
+            " kind = :k, "
+            " props = (props - 'fetchError') || cast(:p as jsonb), "
+            " updated_at = now() "
+            "where id = :i",
+            i=item_id,
+            t=title,
+            ct=content_text,
+            k=kind,
+            p=json.dumps(media_props, ensure_ascii=False),
+        )
+        return
+
+    # 失败路径：不出现 kind = 赋值
+    fail_props = dict(media_props)
+    fail_props["fetchError"] = error
+    conn.run(
+        "update items set "
+        " title = case when title = '' then :t else title end, "
+        " props = props || cast(:p as jsonb), "
+        " updated_at = now() "
+        "where id = :i",
+        i=item_id,
+        t=title,
+        p=json.dumps(fail_props, ensure_ascii=False),
+    )
