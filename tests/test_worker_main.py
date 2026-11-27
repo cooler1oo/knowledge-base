@@ -17,6 +17,7 @@ import pg8000.native
 
 # __main__ 不能 `from kb.worker import main`，要显式导入子模块
 import kb.worker.__main__ as worker_main
+from kb.extract.router import extract
 from kb.store.settings import WORKER_HEARTBEAT_KEY
 
 
@@ -108,11 +109,27 @@ def test_main_传_argv_时用传进来的_不读_sys_argv():
 # ── 抓取器装配 ────────────────────────────────────────────────
 
 
-def test_默认抓取器是_router_extract():
-    """生产必须走真抓取。返回一个可 await 的对象即可，不在这里连网。"""
+def test_默认抓取器要真的传_hub_而不是直接返回_extract():
+    """真机踩过：default_extractor 直接返回 router.extract 函数，
+    而 extract(url, *, hub=None) 在不传 hub 时返回「抓取器未注入」——
+    worker 每一条任务都失败，但测试全绿（因为没验参数）。
+
+    这条钉住「必须把 ParseHub 接上」，而不是只验 callable。
+    """
+    import inspect
+
     extractor = worker_main.default_extractor()
 
-    assert callable(extractor)
+    # 返回的必须是包装过的可调用对象，不能是 router.extract 本身
+    assert extractor is not extract, (
+        "default_extractor 直接返回了 router.extract，没传 hub，"
+        "调用时会被判「抓取器未注入」"
+    )
+    sig = inspect.signature(extractor)
+    # 包装后的签名只收 url 一个参数（hub 已在闭包里）
+    assert list(sig.parameters) == ["url"], (
+        f"抓取器签名应只有 url，实际是 {list(sig.parameters)}"
+    )
 
 
 def test_心跳间隔必须小于_api_的过期阈值():

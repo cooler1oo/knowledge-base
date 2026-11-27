@@ -58,8 +58,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def default_extractor() -> Any:
-    """生产用的抓取器。抽成函数是为了测试能替换它而不动 `run_forever`。"""
-    return extract
+    """生产用的抓取器：把 ParseHub 单例接进 `router.extract`。
+
+    **不能直接返回 `extract`。** `extract(url, *, hub=None)` 在不传 `hub` 时
+    会返回「抓取器未注入，无法抓取」——真机踩过：worker 每一条任务都失败，
+    而单测全绿（因为只验了 callable，没验参数）。
+
+    这里包一层，把 `parsehub_adapter.parse` 作为 hub 传进去。包一层还有个好处：
+    `run_once` 只需要 `Callable[[str], Coroutine]` 这么一个窄契约，
+    不需要知道 hub 的存在。
+
+    单例由 `parsehub_adapter` 内部维护——R3 实测：首次冷启 18.49 秒，
+    复用单例后 0.83 秒。每条任务新建一个 hub 会把 worker 拖垮。
+    """
+    from kb.extract.parsehub_adapter import parse
+
+    class _Hub:
+        async def parse(self, url: str) -> object:
+            return await parse(url)
+
+    async def _extractor(url: str) -> Any:
+        return await extract(url, hub=_Hub())
+
+    return _extractor
 
 
 def _heartbeat_loop(pool: Pool, stop: threading.Event) -> None:
