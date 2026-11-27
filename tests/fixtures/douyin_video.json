@@ -1,0 +1,20 @@
+{
+  "platform": "douyin",
+  "type": "video",
+  "title": "第12集 一口气搞懂支撑现代互联网运转的14个核心网络协议 #网络协议 #程序员 #网络工程师",
+  "content": "",
+  "raw_url": "https://www.douyin.com/video/7000000000000000000",
+  "media": {
+    "url": "https://example.invalid/media/url.mp4",
+    "ext": "mp4",
+    "thumb_url": "https://example.invalid/media/thumb_url.mp4",
+    "width": 768,
+    "height": 576,
+    "backup_urls": [
+      "https://example.invalid/backup/0",
+      "https://example.invalid/backup/1",
+      "https://example.invalid/backup/2"
+    ],
+    "duration": 445071
+  }
+}

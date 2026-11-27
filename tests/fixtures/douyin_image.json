@@ -1,0 +1,17 @@
+{
+  "platform": "douyin",
+  "type": "image",
+  "title": "一些基础的一些编程的词。#ai学习指南 #agent工程 #ai程序员 #人工智能#ai",
+  "content": "",
+  "raw_url": "https://www.douyin.com/video/7000000000000000000",
+  "media": [
+    {
+      "url": "https://example.invalid/media/url.jpg",
+      "ext": "jpg",
+      "thumb_url": null,
+      "width": 1440,
+      "height": 2131,
+      "backup_urls": []
+    }
+  ]
+}
