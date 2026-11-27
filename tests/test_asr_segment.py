@@ -192,6 +192,57 @@ def test_尾巴太短要并进前一段():
     assert plan.spans[0][1] == total
 
 
+# ── 单段时长上限（2026-11-27 平板真机撞出来的）──────────────
+#
+# 平板跑真实抖音视频（445.1 秒）时最后一段是 **55.1 秒**。
+# 根因：原实现「尾巴不到一个窗口就并进前一段」没区分尾巴有多长——
+# 前一段已满额 30 秒，再并进 25 秒尾巴就成了 55 秒。
+# 这正好踩中分段要避免的退化：SenseVoice 的输入上限就是 30 秒。
+#
+# 下面四条覆盖三个真实复现长度（都在本机复现过），外加一条扫长度。
+
+
+def test_445秒音频最后一段不能超过32秒():
+    """平板真实视频的长度。原实现最后一段 55.1 秒。"""
+    total = int(445.1 * SR)
+
+    plan = plan_segments(total_samples=total, sample_rate=SR)
+
+    for i in range(plan.count):
+        length = plan.duration_sec(i)
+        assert length <= 32.0, f"第 {i} 段 {length:.1f} 秒超限"
+
+
+def test_33秒音频不能被并成一段():
+    """剩 3 秒尾巴，并进前一段会变成 33 秒。原实现就这么干的。"""
+    plan = plan_segments(total_samples=33 * SR, sample_rate=SR)
+
+    for i in range(plan.count):
+        length = plan.duration_sec(i)
+        assert length <= 32.0, f"第 {i} 段 {length:.1f} 秒超限"
+
+
+def test_92秒音频不能并出32点3秒():
+    """剩 2.3 秒尾巴，原实现并出 32.3 秒。"""
+    plan = plan_segments(total_samples=int(92.3 * SR), sample_rate=SR)
+
+    for i in range(plan.count):
+        length = plan.duration_sec(i)
+        assert length <= 32.0, f"第 {i} 段 {length:.1f} 秒超限"
+
+
+def test_任何长度都不产生超限段且不漏内容():
+    """扫多个长度，防止只修了某一种尾巴。"""
+    for total_sec in (31, 33, 45, 60.5, 61, 92.3, 120, 445.1, 600):
+        total = int(total_sec * SR)
+        plan = plan_segments(total_samples=total, sample_rate=SR)
+        for i in range(plan.count):
+            length = plan.duration_sec(i)
+            assert length <= 32.0, f"总长 {total_sec}s 的第 {i} 段 {length:.1f} 秒超限"
+        assert plan.spans[0][0] == 0
+        assert plan.spans[-1][1] == total, f"总长 {total_sec}s 漏了内容"
+
+
 # ── 能量计算 ───────────────────────────────────────────────
 
 
@@ -268,11 +319,21 @@ def test_空音频返回空转写():
 def test_单段解码失败不放弃整条音频():
     """一块坏数据不该让整条音频白跑，理由同 worker 收异常。"""
     samples = tone(65 * SR)
+    fail_at = 1
 
-    result = transcribe(samples, SR, ExplodingDecoder(fail_at=1))
+    # 先问「不崩的话应该是几段」，再断言「崩一段就少一段」。
+    # 不写死段数：窗口划分策略一调，写死的数字就会假报警——这会真的发生过。
+    expected = len(transcribe(samples, SR, FakeDecoder()).segments)
+    result = transcribe(samples, SR, ExplodingDecoder(fail_at=fail_at))
 
     assert result.segments, "第 2 段崩了，其余段仍要有结果"
-    assert len(result.segments) == 1
+    assert len(result.segments) == expected - 1
+    # 崩掉那段的区间不该出现在结果里，否则时间轴会错位
+    failed_start = 30.0
+    assert all(
+        s.start_sec >= failed_start + 28 or s.start_sec < failed_start
+        for s in result.segments
+    )
 
 
 def test_传入16位整数口径要报错():

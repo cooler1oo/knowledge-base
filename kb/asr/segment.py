@@ -38,6 +38,16 @@ DEFAULT_SEARCH_SEC = 2.0
 # 再粗会把 20 毫秒的短停顿抹平。
 FRAME_SEC = 0.01
 
+# 「尾巴短到不值得单独成段」的阈值（秒）。
+#
+# 取 1 秒，不取接近窗口长度的值。原实现用 `window - search`（28 秒）当阈值，
+# 含义变成「不到 28 秒的尾巴都并掉」——25 秒的尾巴被并进前一段，
+# 拼出 55 秒的长段（2026-11-27 平板真机复现）。
+#
+# 1 秒的依据：一段 1 秒的语音通常是一个词或半句话，单独解码能得到有效内容；
+# 短于 1 秒基本只有气口和环境噪声，模型容易吐幻觉字，并进前一段更干净。
+MIN_TAIL_SEC = 1.0
+
 
 @dataclass(frozen=True)
 class Plan:
@@ -159,13 +169,17 @@ def plan_segments(
 ) -> Plan:
     """规划切点。切点落在标称位置附近能量最低处。
 
-    `energy` 由 `frame_energy` 预先算好传入。传 `None` 表示不做吸附、等距硬切
-    ——留这条路是为了能用「纯算术」验证窗口划分本身，也是没有音频时的兜底。
+        `energy` 由 `frame_energy` 预先算好传入。传 `None` 表示不做吸附、等距硬切
+        ——留这条路是为了能用「纯算术」验证窗口划分本身，也是没有音频时的兜底。
 
-    单段时长的硬边界：`[window_sec - search_sec, window_sec + search_sec]`。
+        单段时长的硬边界：`[window_sec - search_sec, window_sec + search_sec]`。
     这个边界保证两件事：
-    1. 不会因为连续几次向前吸附而把段越切越短（吸附偏移不累积）；
-    2. 不会出现超过 30 秒的段，避免长音频退化。
+        1. 不会因为连续几次向前吸附而把段越切越短（吸附偏移不累积）；
+        2. 吸附后的段不会超过 `window_sec + search_sec`（默认 32 秒）。
+
+    **尾巴的处理**：剩余不足 `MIN_TAIL_SEC`（1 秒）时并未进前一段，但**只有当前一段
+    尚未吃满 `max_len` 才并**。否则宁可留一个短尾巴单独成段——短段只是多一次解码，
+    超过 30 秒却会让模型重新退化，那是分段的初衷所反对的。
     """
     if sample_rate <= 0:
         raise ValueError("sample_rate 必须是正数")
@@ -181,6 +195,7 @@ def plan_segments(
     window = int(window_sec * sample_rate)
     min_len = max(1, int((window_sec - search_sec) * sample_rate))
     max_len = int((window_sec + search_sec) * sample_rate)
+    min_tail = int(MIN_TAIL_SEC * sample_rate)
 
     spans: list[tuple[int, int]] = []
     pos = 0
@@ -201,9 +216,14 @@ def plan_segments(
             if pos + min_len <= candidate <= pos + max_len:
                 end = candidate
 
-        # 收尾保护：剩下的尾巴太短就并进当前段，不单独成段。
+        # 收尾保护：尾巴短到不值得单独成段时，并进当前段。
         # 单独一段 0.3 秒的音频，模型只会吐出噪声。
-        if total_samples - end < min_len:
+        #
+        # **但只有当前一段还没吃满时才允许并**（`total_samples - pos <= max_len`）。
+        # 少了这半个条件，就会切出超过模型上限的长段——2026-11-27 平板真机：
+        # 445.1 秒抖音视频最后一段变成 55.1 秒，而 SenseVoice 的输入上限是 30 秒，
+        # 分段本来是为了躲开这个上限，结果自己又踩进去了。
+        if total_samples - end < min_tail and total_samples - pos <= max_len:
             end = total_samples
 
         spans.append((pos, end))
