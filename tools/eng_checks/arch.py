@@ -25,7 +25,7 @@ RULES_FILE = "layer_rules.toml"
 
 # 配置文件缺失时的兜底：保持本项目当前的分层口径
 DEFAULT_RULES: dict[str, object] = {
-    "dirs": ["kb"],
+    "dirs": ["."],
     "write_sql_allowed_prefixes": ["kb/store/"],
     "import_deny": [
         {"path_prefix": "kb/extract/", "layer": "抓取层", "modules": ["kb.store"]},
@@ -190,6 +190,9 @@ def check_file(
     return out
 
 
+SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "dist", "build"}
+
+
 def scan(root: Path, rules: dict[str, object] | None = None) -> list[Violation]:
     """按配置扫指定目录。目录不存在时跳过：规则暂时没有对象，不算失败。"""
     if rules is None:
@@ -200,15 +203,30 @@ def scan(root: Path, rules: dict[str, object] | None = None) -> list[Violation]:
             return [Violation(RULES_FILE, 0, "规则文件", str(exc))]
     else:
         active = rules
-    dirs = active.get("dirs", ["kb"])
-    dirs = [str(d) for d in dirs] if isinstance(dirs, list) else ["kb"]
+    dirs = active.get("dirs", ["."])
+    dirs = [str(d) for d in dirs] if isinstance(dirs, list) else ["."]
 
     out: list[Violation] = []
+    scanned = 0
     for name in dirs:
         base = root / name
         if not base.is_dir():
             continue
         for path in sorted(base.rglob("*.py")):
+            if SKIP_DIRS & set(path.relative_to(root).parts):
+                continue
             rel = path.relative_to(root).as_posix()
+            scanned += 1
             out.extend(check_file(rel, path.read_text(encoding="utf-8"), active))
+
+    if scanned == 0:
+        # 一个文件都没扫到就等于没检查。宁可红，也不许显示「通过」骗人。
+        out.append(
+            Violation(
+                RULES_FILE,
+                0,
+                "规则空转",
+                f"按 dirs={dirs} 没扫到任何 .py 文件；请确认规则里的目录名对不对",
+            )
+        )
     return out
