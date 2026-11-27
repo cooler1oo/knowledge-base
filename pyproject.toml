@@ -11,6 +11,12 @@ dependencies = [
     # 抓取层主选。锁 2.4.x：2.4.4 是 R0 在平板上实测可用的版本，
     # 大版本升级要重跑 R3 的真机抓取测试（抖音解析器改版风险高，见技术方案 §4.8）
     "parsehub>=2.4.4,<2.5",
+    # AI 层发一次 OpenAI 兼容请求。必须显式声明：本机的 httpx 是 parsehub 的
+    # 传递依赖（实测 0.28.1，Required-by 是 f2 与 parsehub），换干净机器或
+    # parsehub 升级后 `import httpx` 就可能失败，表现为 worker 起不来。
+    # 锁 0.28 下界是因为 trust_env=False 与 Timeout(connect=, read=) 的签名
+    # 在该版本实测过；不锁上界（1.x 未发布，锁上界会挡住升级）。
+    "httpx>=0.28",
 ]
 
 [project.optional-dependencies]
@@ -32,7 +38,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["kb", "kb.asr", "kb.store", "tools", "tools.doc_checks"]
+packages = ["kb", "kb.ai", "kb.asr", "kb.store", "tools", "tools.doc_checks"]
 
 [tool.setuptools.package-data]
 "kb.store" = ["migrations/*.sql", "migrations/README.md"]

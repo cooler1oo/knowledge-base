@@ -157,3 +157,118 @@ def recover_stale(conn: pg8000.native.Connection) -> int:
         "returning id",
     )
     return len(rows)
+
+
+# ── 推迟 / 一次判死 / 自定义退避（AI-04 / AI-05 / B22 / B25 / B26）────────
+#
+# 为什么是三个窄函数而不是给 `mark_failed` 加一个 `count_attempt: bool = True`：
+# `mark_failed` 的 SQL 里 `attempts = attempts + 1`、`state = case when
+# attempts + 1 >= 3`、`run_after = now() + 2^attempts` **三处都依赖「这次算一次
+# 失败」**。加参数等于在一条 SQL 里塞两套互斥分支，而默认值 True 意味着
+# 「忘记传」时静默消耗一次尝试——`E1` 的断言会变成靠调用方自觉。
+#
+# 所以 `defer` / `defer_until` 的 SQL 里**根本不出现 `attempts`**。
+# 这是「推迟不计次」在代码层面可一眼确认的证据，也是
+# `tests/test_jobs_defer.py::test_defer_的SQL里不出现attempts_E1` 守的东西。
+#
+# 间隔一律写 `interval '1 second' * :seconds`，**不写 `interval 'N minutes'`**：
+# `recover_stale` 靠 `interval '15 minutes'` 作为判据，两处都写分钟字面量会让
+# 假连接把两条语句看成一类。
+
+
+def defer(
+    conn: pg8000.native.Connection, job_id: int, seconds: float, reason: str
+) -> None:
+    """把任务往后推 `seconds` 秒。**`attempts` 不变**——推迟不是失败。
+
+    两个使用方：
+    - 未配置 AI（`AI-04`）：推 1800 秒（30 分钟）
+    - 预算超限的通用推迟（目前不用，留给将来的「服务端要求稍后」）
+
+    原因写进 `jobs.error`，前缀固定 `已推迟：`。`derive_status` 只看 `state`，
+    所以带 `error` 的 `pending` 任务不会让条目显示成「处理失败」，
+    同时用户能在详情页看到「为什么还没出摘要」。
+    """
+    conn.run(
+        "update jobs set "
+        " state = 'pending', "
+        " run_after = now() + interval '1 second' * :seconds, "
+        " error = :e, "
+        " updated_at = now() "
+        "where id = :j",
+        j=job_id,
+        seconds=seconds,
+        e=reason,
+    )
+
+
+def defer_until(
+    conn: pg8000.native.Connection, job_id: int, when: datetime, reason: str
+) -> None:
+    """把任务推到指定时刻。`attempts` 不变。
+
+    预算超限推到下月 1 日 00:05 用这个（`D3`）。与 `defer` 分开的原因是
+    「推到某时刻」与「推多久」的入参类型不同，混成一个函数就要用
+    `datetime | float` 联合类型，读代码的人得靠猜。
+    """
+    conn.run(
+        "update jobs set "
+        " state = 'pending', "
+        " run_after = :when, "
+        " error = :e, "
+        " updated_at = now() "
+        "where id = :j",
+        j=job_id,
+        when=when,
+        e=reason,
+    )
+
+
+def fail_hard(conn: pg8000.native.Connection, job_id: int, error: str) -> None:
+    """算一次失败并**直接判死**（`B26`：401/403）。
+
+    为什么必须一次判死：密钥错或余额不足属于不可自愈错误。套用「满 3 次
+    failed」的统一规则会让用户白等 3 分钟，且最终提示仍是「重试 3 次后失败」，
+    看不出真正原因是余额。
+
+    `attempts = attempts + 1` 保留：它确实消耗了一次尝试，界面上的
+    「试了 1 次就失败」是事实。`run_after` 不动——已判死，不会被再领取。
+    """
+    conn.run(
+        "update jobs set "
+        " attempts = attempts + 1, "
+        " state = 'failed', "
+        " error = :e, "
+        " updated_at = now() "
+        "where id = :j",
+        j=job_id,
+        e=error,
+    )
+
+
+def mark_failed_delayed(
+    conn: pg8000.native.Connection, job_id: int, error: str, seconds: float
+) -> str:
+    """与 `mark_failed` 同形态（`attempts+1`、满 3 次判死），只把退避间隔换成入参。
+
+    **不新增语义**——这是它存在的核心理由。两套退避算法并存时，改了一处忘了
+    另一处就是两周后才会被发现的分歧（现象是「连接失败后等的时间与设计不符」，
+    而设计文档写的是 3 分钟）。
+
+    使用方：连接失败退避 180 秒（`B22`，避免每 1 分钟打一次 DNS）、
+    429 按 `Retry-After`（`B25`，服务端自己说了等多久，比我们猜的准）。
+    """
+    rows = conn.run(
+        "update jobs set "
+        " attempts = attempts + 1, "
+        " state = case when attempts + 1 >= 3 then 'failed' else 'pending' end, "
+        " run_after = now() + interval '1 second' * :seconds, "
+        " error = :e, "
+        " updated_at = now() "
+        "where id = :j "
+        "returning state",
+        j=job_id,
+        seconds=seconds,
+        e=error,
+    )
+    return str(rows[0][0]) if rows else "pending"

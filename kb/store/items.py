@@ -186,6 +186,7 @@ with new_item as (
 ), queued as (
   insert into jobs (item_id, step)
   select id, :step from new_item
+  on conflict (item_id, step) where state in ('pending','running') do nothing
   returning item_id
 )
 select id, kind from new_item
@@ -459,4 +460,134 @@ def apply_extract(
         i=item_id,
         t=title,
         p=json.dumps(fail_props, ensure_ascii=False),
+    )
+
+
+# ── 摘要落库（A1 / A4 / G1 / G2 / G3）──────────────────────────────────
+#
+# 为什么不复用 `apply_extract`：那条 SQL 同时写 `title` / `content_text` /
+# `kind`，摘要走它会**把正文覆盖成空串**。这是本轮最容易犯且最难发现的错：
+# 界面上摘要正常显示，只是正文没了，而「正文」与「摘要」互相污染之后
+# 检索权重也失去意义（PRD §4.7 明确不做「把摘要写进 content_text」）。
+#
+# 所以摘要路径的 SQL 里**不得出现** `content_text` / `kind` / `ocr_text`
+# 这三个名字——`tests/test_items_ai_props.py` 的第一条用例逐字断言这一点。
+
+
+def apply_summary(
+    conn: pg8000.native.Connection,
+    item_id: int,
+    summary: str,
+    basis: str,
+) -> None:
+    """写 `items.summary` 与 `props.summaryBasis`。**不碰其他任何列。**
+
+    `basis` 只有两个合法值：`content`（依据正文）/ `title`（依据标题）。
+    `AI-08` 要求每次成功都写它，因为用户需要知道「这条摘要读过全文还是只看过标题」
+    ——抖音条目的摘要只能基于标题，照实说明比假装读过全文更可信。
+
+    同时清掉 `summarySkipped`：上一次可能因 `no_text` 被跳过，这次成功了，
+    留着旧标记会让界面一直显示「未生成摘要」。
+    """
+    props: dict[str, object] = {"summaryBasis": basis}
+    conn.run(
+        "update items set "
+        " summary = :s, "
+        " props = (props - 'summarySkipped') || cast(:p as jsonb), "
+        " updated_at = now() "
+        "where id = :i",
+        i=item_id,
+        s=summary,
+        p=json.dumps(props, ensure_ascii=False),
+    )
+
+
+def mark_summary_skipped(
+    conn: pg8000.native.Connection, item_id: int, reason: str
+) -> None:
+    """标记「这一次没产出摘要」，**`items.summary` 保持原值**。
+
+    `reason` 只有两个合法值：
+    - `no_text`（`B15`）：正文标题都空，客观无内容可摘要，零次调用
+    - `title_only`（`B16`）：模型返回的摘要与标题逐字相同
+
+    为什么不写 `summary = null`：`title_only` 只表示「这一次没产出」，
+    不表示「这条内容不该有摘要」。重跑场景里把已有摘要清空是数据丢失。
+    """
+    conn.run(
+        "update items set "
+        " props = props || cast(:p as jsonb), "
+        " updated_at = now() "
+        "where id = :i",
+        i=item_id,
+        p=json.dumps({"summarySkipped": reason}, ensure_ascii=False),
+    )
+
+
+# ── `props.aiTags`：`summarize` → `tag` 的交接（AI-09）──────────────────
+#
+# 为什么存 `props` 而不是临时表 / `jobs` 加列（设计 §6.3）：
+# - `props` 是长尾属性桶，写它不需要迁移，一条 `props || ...` 即可
+# - 临时表要多一次迁移 + 一张表的生命周期管理（写、读、清理、崩溃后残留）
+# - `jobs` 加列会让「任务」与「任务产出」混在一张表里，且 `jobs` 的行会被后续
+#   轮次清理，而 `B19` 的重跑对照需要这份数据在 job 标 done 后仍可读
+#
+# 存**原始名**而不是 `tag_id`：`tag` 步骤要做词表校验，校验的输入必须是
+# 「模型当时说了什么」。存 id 等于在 `summarize` 里就把校验做了一半，
+# 而两步分开的意义正是「生成」与「校验落库」解耦（`F1` 空词表场景可证）。
+
+
+def set_ai_tags_raw(
+    conn: pg8000.native.Connection, item_id: int, names: tuple[str, ...] | list[str]
+) -> None:
+    """把模型返回的原始标签名写进 `props.aiTags`。**覆盖，不是追加。**
+
+    为什么覆盖很重要（`B19`）：重跑三次若写成数组拼接，`aiTags` 会有 9 个名字，
+    `tag` 步骤的「最多 3 个」就会基于叠加后的错误输入工作。
+
+    空数组也写（`A5`）：「没写过」与「写了空」在重跑对照时含义不同——
+    前者说明这一步还没跑过。
+    """
+    conn.run(
+        "update items set "
+        " props = props || cast(:p as jsonb), "
+        " updated_at = now() "
+        "where id = :i",
+        i=item_id,
+        p=json.dumps({"aiTags": list(names)}, ensure_ascii=False),
+    )
+
+
+def get_ai_tags_raw(conn: pg8000.native.Connection, item_id: int) -> tuple[str, ...]:
+    """读 `props.aiTags`。条目不存在、键不存在、json 坏了都返回空元组。
+
+    返回空元组而不是 `None`：调用方（`tag` 步骤）对「没有标签可贴」只有一种
+    处理（写空、标 done），区分 `None` 与 `()` 只会让每个调用点多一个分支。
+    """
+    rows = conn.run("select props from items where id = :i", i=item_id)
+    if not rows:
+        return ()
+    props = _as_props(rows[0][0])
+    raw = props.get("aiTags")
+    if not isinstance(raw, list):
+        return ()
+    return tuple(item for item in raw if isinstance(item, str))
+
+
+def set_ai_tag_ambiguous(
+    conn: pg8000.native.Connection, item_id: int, ambiguous: bool
+) -> None:
+    """记下「这次的标签名在词表里对应多个父标签」（`F3`）。
+
+    为什么要把这件事写出来而不是静默取小 id：静默丢一半会让用户看到
+    「AI 只打了一个标签」却不知道为什么。写一个布尔之后，界面轮次可以直接
+    提示「有个标签名在多个分类下都有，只取了其中一个」。
+    """
+    conn.run(
+        "update items set "
+        " props = props || cast(:p as jsonb), "
+        " updated_at = now() "
+        "where id = :i",
+        i=item_id,
+        p=json.dumps({"aiTagAmbiguous": ambiguous}, ensure_ascii=False),
     )
