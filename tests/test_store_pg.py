@@ -61,7 +61,7 @@ def _new_item(conn, kind: str = "article") -> int:
 
 
 def test_first_run_applies_every_version(fresh_db):
-    assert [m.version for m in fresh_db] == [1, 2, 3]
+    assert [m.version for m in fresh_db] == [1, 2, 3, 4]
 
 
 def test_twelve_tables_exist(pg_cfg, fresh_db):
@@ -84,7 +84,7 @@ def test_second_run_changes_nothing(pg_cfg, fresh_db):
     finally:
         conn.close()
     assert again == []
-    assert before == after == 3
+    assert before == after == 4
 
 
 def test_status_reports_complete(pg_cfg, fresh_db):
@@ -94,8 +94,8 @@ def test_status_reports_complete(pg_cfg, fresh_db):
     finally:
         conn.close()
     assert result == {
-        "schema_version": 3,
-        "applied": 3,
+        "schema_version": 4,
+        "applied": 4,
         "pending": 0,
         "tables": 12,
     }
@@ -168,8 +168,64 @@ def test_tags_max_two_levels(conn):
 
 
 def test_tags_sibling_name_is_normalized(conn):
-    conn.run("insert into tags (name) values ('AI相关')")
-    rejects(conn, "insert into tags (name) values ('ai相关')")
+    """表达式唯一索引 `(coalesce(parent_id,0), lower(btrim(name)))` 的效果。
+
+    这里用「读书」而不是「AI相关」：0004 已经预置了 8 个一级标签，
+    拿其中一个当例子的第一个 insert 就会撞上已有行，测不到「重复被拒」。
+    """
+    conn.run("insert into tags (name) values ('读书笔记')")
+    rejects(conn, "insert into tags (name) values ('读书笔记')")
+    rejects(conn, "insert into tags (name) values ('  读书笔记  ')")
+    rejects(conn, "insert into tags (name) values ('读书笔记 ')")
+    # 大小写差异也拦（中文没大小写，用一个中文名 + 拉丁字母的组合验证）
+    conn.run("insert into tags (name) values ('Skill插件')")
+    rejects(conn, "insert into tags (name) values ('skill插件')")
+
+
+# ── 0004 预置标签（AI-03 / F6）──────────────────────────────────
+
+
+def test_0004_seeds_eight_preset_tags(fresh_db, pg_cfg):
+    """AI-03 / F6：迁移跑完，8 个预置一级标签都在库。
+
+    这条必须在真库上验：`on conflict do nothing` 与表达式唯一索引的配合
+    只有 PG 自己判得了，静态读 SQL 文件看不出「报没有匹配的约束」。
+    """
+    from kb.store.db import connect as _connect
+
+    c = _connect(pg_cfg)
+    try:
+        rows = c.run(
+            "select name from tags where is_preset and parent_id is null order by id"
+        )
+    finally:
+        c.close()
+    assert [r[0] for r in rows] == [
+        "AI相关",
+        "工作赚钱",
+        "学点东西",
+        "生活过日子",
+        "健康",
+        "好看的东西",
+        "好玩放松",
+        "先存着以后用",
+    ]
+
+
+def test_0004_rerun_keeps_eight_rows(fresh_db, pg_cfg):
+    """F6：迁移再跑一次，预置标签仍是 8 行（不是 16 行）。"""
+    from kb.store.db import connect as _connect
+    from kb.store.migrate import discover as _discover
+    from kb.store.migrate import migrate as _migrate
+
+    c = _connect(pg_cfg)
+    try:
+        again = _migrate(c, _discover())
+        rows = c.run("select count(*) from tags where is_preset")
+    finally:
+        c.close()
+    assert again == [], "第二次迁移应当无事可做"
+    assert int(rows[0][0]) == 8
 
 
 def test_url_norm_unique_allows_after_soft_delete(conn):
