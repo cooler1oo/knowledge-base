@@ -194,3 +194,44 @@ def test_corrupt_marker_is_treated_as_missing(tmp_path):
     marker.write_text("{不是 json", encoding="utf-8")
     problems = git_rules.check_last_green(marker, "abc")
     assert [p.rule for p in problems] == ["没跑过测试"]
+
+
+# ── 规则文件：写坏了必须报错，不许静默退回默认 ────────────────
+
+
+def test_missing_rules_file_falls_back_to_defaults(tmp_path):
+    """项目可以完全不配规则文件，此时用默认口径。"""
+    assert arch.load_rules(tmp_path / "nope.toml") == arch.DEFAULT_RULES
+
+
+def test_broken_rules_file_raises(tmp_path):
+    """语法错的规则文件必须报错——静默退回默认等于规则没生效却显示通过。"""
+    bad = tmp_path / arch.RULES_FILE
+    bad.write_text("dirs = [ kb\n", encoding="utf-8")
+    with pytest.raises(arch.RuleConfigError):
+        arch.load_rules(bad)
+
+
+def test_broken_rules_file_becomes_a_violation(tmp_path):
+    """scan 要把配置错误当成一条违规，让退出码非 0。"""
+    (tmp_path / arch.RULES_FILE).write_text("dirs = [ kb\n", encoding="utf-8")
+    problems = arch.scan(tmp_path)
+    assert [p.rule for p in problems] == ["规则文件"]
+    assert "读不出来" in problems[0].detail
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'dirs = "kb"\n',  # dirs 应是数组
+        "write_sql_allowed_prefixes = [1, 2]\n",  # 应是字符串数组
+        "import_deny = {}\n",  # 应是数组
+        '[[import_deny]]\nmodules = ["kb.store"]\n',  # 缺 path_prefix
+        '[[import_deny]]\npath_prefix = "kb/ai/"\n',  # 缺 modules
+    ],
+)
+def test_wrong_shaped_rules_are_rejected(tmp_path, body):
+    bad = tmp_path / arch.RULES_FILE
+    bad.write_text(body, encoding="utf-8")
+    with pytest.raises(arch.RuleConfigError):
+        arch.load_rules(bad)

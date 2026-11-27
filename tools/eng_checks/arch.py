@@ -45,15 +45,56 @@ class Violation:
         return f"{self.path}:{self.line} [{self.rule}] {self.detail}"
 
 
+class RuleConfigError(RuntimeError):
+    """规则文件存在但不可用。
+
+    不能静默退回默认口径：那样规则没生效却照样显示「通过」，比没有检查更危险。
+    """
+
+
+def _require_str_list(data: dict[str, object], key: str, where: str) -> None:
+    value = data.get(key)
+    if value is None:
+        return
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise RuleConfigError(f"{where}: {key} 必须是字符串数组")
+
+
 def load_rules(path: Path) -> dict[str, object]:
-    """读声明式规则；文件不存在或格式不对就用默认口径。"""
+    """读声明式规则。
+
+    - 文件不存在 → 用默认口径（项目可以不配）
+    - 文件存在但读不出/写错 → **报错**，不退回默认
+    """
     if not path.is_file():
         return DEFAULT_RULES
     try:
         with path.open("rb") as fh:
             data = tomllib.load(fh)
-    except (OSError, tomllib.TOMLDecodeError):
-        return DEFAULT_RULES
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise RuleConfigError(f"{path.name} 读不出来：{exc}") from exc
+
+    where = path.name
+    _require_str_list(data, "dirs", where)
+    _require_str_list(data, "write_sql_allowed_prefixes", where)
+    deny = data.get("import_deny", [])
+    if not isinstance(deny, list):
+        raise RuleConfigError(f"{where}: import_deny 必须是数组")
+    for idx, rule in enumerate(deny, 1):
+        if not isinstance(rule, dict):
+            raise RuleConfigError(f"{where}: import_deny 第 {idx} 项必须是表")
+        if not isinstance(rule.get("path_prefix"), str):
+            raise RuleConfigError(f"{where}: import_deny 第 {idx} 项缺 path_prefix")
+        modules = rule.get("modules")
+        if (
+            not isinstance(modules, list)
+            or not modules
+            or not all(isinstance(m, str) for m in modules)
+        ):
+            raise RuleConfigError(
+                f"{where}: import_deny 第 {idx} 项的 modules 必须是非空字符串数组"
+            )
+
     merged = dict(DEFAULT_RULES)
     merged.update({k: v for k, v in data.items() if v})
     return merged
@@ -133,7 +174,14 @@ def check_file(
 
 def scan(root: Path, rules: dict[str, object] | None = None) -> list[Violation]:
     """按配置扫指定目录。目录不存在时跳过：规则暂时没有对象，不算失败。"""
-    active = rules or load_rules(root / RULES_FILE)
+    if rules is None:
+        try:
+            active = load_rules(root / RULES_FILE)
+        except RuleConfigError as exc:
+            # 把配置错误当成一条违规报出去，退出码非 0——不许静默降级
+            return [Violation(RULES_FILE, 0, "规则文件", str(exc))]
+    else:
+        active = rules
     dirs = active.get("dirs", ["kb"])
     dirs = [str(d) for d in dirs] if isinstance(dirs, list) else ["kb"]
 
