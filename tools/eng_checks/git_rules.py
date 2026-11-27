@@ -149,6 +149,65 @@ def check_pushed() -> list[Problem]:
     return []
 
 
+# ── git 走不走代理 ───────────────────────────────────────────
+#
+# 为什么需要这条：`curl` 会读 `HTTPS_PROXY`，git **不会**。
+# Git for Windows 默认 `http.sslBackend=schannel`，这个后端只用
+# `http.proxy` 配置项，不碰环境变量。于是出现过这种事：
+#
+#   $ echo $HTTPS_PROXY          → http://127.0.0.1:24377   （环境里明明有）
+#   $ git ls-remote origin       → schannel: server closed abruptly
+#   $ git -c http.proxy=... push → 成功
+#
+# 报错信息长得像 TLS 问题（`missing close_notify` / `unexpected eof`），
+# 实际是请求根本没到代理，直连被墙。抓这个坑花的时间足够写十条检查。
+#
+# 端口是**动态**的（WorkBuddy 每次会话重新分配），所以这里不写死端口：
+# 只判「环境里有代理变量，但 git 读不到」这个矛盾，矛盾在就报警，
+# 并把实际端口原样带出来供直接使用。
+
+PROXY_ENV_KEYS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+
+
+def _env_proxy() -> str | None:
+    """环境变量里给的代理地址（优先 https）。"""
+    for key in PROXY_ENV_KEYS:
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return None
+
+
+def _git_proxy() -> str | None:
+    """git 实际生效的代理（仓库级或全局级）。"""
+    try:
+        return _git("config", "--get", "http.proxy").strip() or None
+    except RuntimeError:
+        return None
+
+
+def check_git_proxy() -> list[Problem]:
+    """环境有代理但 git 没配 → 推送会以 TLS 报错误导人。
+
+    只在这种「矛盾」存在时报错，环境里本来就没代理时不误报
+    （那种情况直连可能本来就通，不该管）。
+    """
+    env_proxy = _env_proxy()
+    if not env_proxy:
+        return []
+    if _git_proxy():
+        return []
+    return [
+        Problem(
+            "git 读不到代理",
+            f"环境有 {env_proxy} 但 git 没配 http.proxy。"
+            f"Git 的 schannel 后端只用配置项、不读环境变量，"
+            f"直接 push 会报 TLS 错。先跑一次："
+            f"git config http.proxy {env_proxy}",
+        )
+    ]
+
+
 # ── 「测试跑过」的留痕 ───────────────────────────────────────
 #
 # 为什么记内容哈希而不是 commit 号：测试几乎总是在提交之前跑，提交之后 HEAD 变了
@@ -199,10 +258,22 @@ def read_last_green(marker: Path) -> dict[str, str] | None:
 
 
 def check_last_green(marker: Path, current_tree: str) -> list[Problem]:
-    """交付前必须有「当前这份内容跑过测试且全绿」的记录。"""
+    """交付前必须有「当前这份内容跑过测试且全绿」的记录。
+
+    提示语里特意写成裸 `python -m pytest`：外部还有一层 Stop 门禁，它只认
+    **第一段是 python/pytest 的命令**。`cd x && python -m pytest` 会被它判成
+    「没跑验证」——尽管测试确实跑了、留痕也确实写了。本项目已连续被这条
+    判错 4 次，原因不在测试，在命令形式的包装。所以这里给的永远是能同时
+    满足两套机制的形式。
+    """
     data = read_last_green(marker)
     if not data:
-        return [Problem("没跑过测试", "先跑 python -m pytest，绿灯之后才算做完")]
+        return [
+            Problem(
+                "没跑过测试",
+                "先跑 python -m pytest（不要加 cd 前缀，见下方说明）",
+            )
+        ]
     if not current_tree:
         return [Problem("取不到内容哈希", "确认在 git 仓库里执行")]
     if data.get("tree") != current_tree:

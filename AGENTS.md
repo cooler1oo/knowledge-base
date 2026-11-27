@@ -109,13 +109,18 @@ demo/            可交互原型
 | 空值漏判、枚举写错、跨模块乱传结构 | `mypy`（`[tool.mypy]`） | ① ② ③ |
 | 跨层调用、模块直接摸别人的表 | `python -m tools.eng_checks --arch`（AST 扫 `kb/`） | ① ② ③ |
 | 提交信息与提交粒度 | `python -m tools.eng_checks --commit-msg` / `--staged` | ① |
-| 推送前必须提交干净 | `python -m tools.eng_checks --pre-push` | pre-push |
+| 推送前必须提交干净、且 git 能走代理 | `python -m tools.eng_checks --pre-push` | pre-push |
 | 文档规矩（禁用词、命名、复用调研） | `python -m tools.doc_checks` | ① ② ③ |
 | 行为回归与覆盖率底线 | `pytest --cov`（阈值在 `[tool.coverage.report]`） | ③ |
 
 **交付前一条命令自检**：`python -m tools.eng_checks --all`（架构 + 工作区干净 + 已推送 + **当前内容跑过测试**）。
 其中「跑过测试」由 `tests/conftest.py` 在会话全绿时写入 `.pytest_cache/kb-last-green.json`（记内容哈希，不是 commit 号），
 `--all` 比对哈希：内容变过就要求重跑。**本地全量**：`python -m pytest -q` + `python -m tools.doc_checks --all`。
+
+**跑测试时不要给命令加 `cd` 前缀**。外部的 Stop 门禁只认「第一段是 `python`/`pytest`」的命令，
+`cd 某目录 && python -m pytest` 会被判成「没跑验证」而反复拦下——尽管测试真跑了、留痕也写了。
+本项目因此连续被误判 4 次，每次都要重新排查。要么在项目根直接跑 `python -m pytest -q`，
+要么用 `python -m pytest --rootdir=<根> <根>/tests` 显式指定路径。
 
 **架构规则是声明式的**：改 `layer_rules.toml`（扫哪些目录、哪层允许写库、哪层禁 import 数据库），
 执行器 `tools/eng_checks/arch.py` 不动。

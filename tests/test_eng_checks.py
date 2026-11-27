@@ -196,6 +196,56 @@ def test_corrupt_marker_is_treated_as_missing(tmp_path):
     assert [p.rule for p in problems] == ["没跑过测试"]
 
 
+# ── git 走不走代理：环境有代理但 git 读不到，必须拦 ───────────
+#
+# 这组用例守的是一个真实踩过的坑（2026-11-27，连续 4 次推送失败）：
+#
+#   $ echo $HTTPS_PROXY        → http://127.0.0.1:24377   （环境里明明有）
+#   $ git push                 → schannel: server closed abruptly
+#   $ git -c http.proxy=... push → 成功
+#
+# git 的 schannel 后端只用 `http.proxy` 配置项，**不读环境变量**，
+# 而 curl 是读的。所以「环境里配了代理」这件事会让人误以为 git 也走了代理，
+# 报错信息又长得像 TLS 问题（missing close_notify / unexpected eof），
+# 实际是请求根本没到代理。
+#
+# 端口是动态的（每次会话重新分配），规则因此不写死端口，
+# 只判「环境有、git 没有」这个矛盾。
+
+
+def test_env_proxy_without_git_config_is_blocked(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:24377")
+    monkeypatch.setattr(git_rules, "_git_proxy", lambda: None)
+
+    problems = git_rules.check_git_proxy()
+
+    assert [p.rule for p in problems] == ["git 读不到代理"]
+    # 报错必须把实际端口带出来，否则拿到报错还要自己去翻环境变量
+    assert "24377" in problems[0].detail
+    # 并且给出可直接粘贴的修法
+    assert "git config http.proxy" in problems[0].detail
+
+
+def test_env_proxy_with_git_config_passes(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:24377")
+    monkeypatch.setattr(git_rules, "_git_proxy", lambda: "http://127.0.0.1:24377")
+
+    assert git_rules.check_git_proxy() == []
+
+
+def test_no_env_proxy_is_not_a_problem(monkeypatch):
+    """环境里本来就没代理 → 不该报错。
+
+    直连可能本来就通（比如在家），此时报「git 没配代理」是误报。
+    只在「矛盾」存在时才拦：环境说有、git 说没有。
+    """
+    for key in git_rules.PROXY_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(git_rules, "_git_proxy", lambda: None)
+
+    assert git_rules.check_git_proxy() == []
+
+
 # ── 规则文件：写坏了必须报错，不许静默退回默认 ────────────────
 
 

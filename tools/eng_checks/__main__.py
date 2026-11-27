@@ -58,12 +58,16 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.pre_push:
-        return _report(git_rules.check_worktree_clean(), "推送前工作区")
+        return _report(
+            git_rules.check_worktree_clean() + git_rules.check_git_proxy(),
+            "推送前工作区",
+        )
 
     # --all：任何一项红就算没做完
     problems: list[object] = []
     problems += arch.scan(ROOT)
     problems += git_rules.check_worktree_clean()
+    problems += git_rules.check_git_proxy()
     problems += git_rules.check_pushed()
     try:
         tree = git_rules.working_tree_hash(ROOT)
