@@ -128,16 +128,32 @@ class ReuseAudit:
     found_section: bool = False
     rows: list[ReuseRow] = field(default_factory=list)
     violations: list[Violation] = field(default_factory=list)
+    # 列数不符的行：(行号, 实际列数, 期望列数)。
+    # 单独记下来而不是直接丢弃，见 parse_audit 里的说明。
+    malformed: list[tuple[int, int, int]] = field(default_factory=list)
 
 
 def mode_for(path: str | Path) -> str | None:
-    """按目录决定严格度。返回 strict / lite / None（不校验）。"""
+    """按目录决定严格度。返回 strict / lite / None（不校验）。
+
+    从文件所在目录**逐级向上**找，第一个命中的分类目录决定严格度。
+
+    为什么不能只看父目录（旧实现的 bug）：`docs/tech/2026/x.md` 的父目录叫
+    `2026`，不是 `tech`，于是返回 None、整条检查静默放行。按年份或主题建子目录
+    是很自然的组织方式，一旦有人这么做，检查就悄悄不查了，而且没有任何
+    「未检查」的输出——静默失效比不检查更糟，因为你以为查过了。
+
+    向上查找还顺带解决了另一种失效：`docs/tech/x.md` 与 `docs/tech/sub/y.md`
+    现在走同一套规则，不需要靠「别建子目录」这种口头约定。
+    """
     p = Path(path)
-    name = p.parent.name if p.suffix else p.name
-    if name in STRICT_DIRS:
-        return "strict"
-    if name in LITE_DIRS:
-        return "lite"
+    # 传进来的是目录时从它自己开始找；是文件时从它的父目录开始
+    start = p if not p.suffix else p.parent
+    for parent in (start, *start.parents):
+        if parent.name in STRICT_DIRS:
+            return "strict"
+        if parent.name in LITE_DIRS:
+            return "lite"
     return None
 
 
@@ -227,13 +243,18 @@ def parse_audit(text: str) -> ReuseAudit:
         if current_kind == "other":
             continue
 
+        expected = len(COLUMNS) if current_kind == "seven" else len(LEGACY_COLUMNS_6)
+        if len(cells) != expected:
+            # 不能静默跳过（旧实现的 bug）。列数不符最常见的原因是单元格里
+            # 有未转义的 `|`，比如理由写「A|B 都要」。这行被无声吞掉之后，
+            # 输出仍然是「0 违规」——而 0 违规与「这行有问题」在结果上完全
+            # 一样，无法区分，等于把一条有问题的调研记录藏起来了。
+            audit.malformed.append((lineno, len(cells), expected))
+            continue
+
         if current_kind == "seven":
-            if len(cells) != len(COLUMNS):
-                continue
             runtime, reason = cells[5], cells[6]
         else:
-            if len(cells) != len(LEGACY_COLUMNS_6):
-                continue
             runtime, reason = "", cells[5]
         audit.rows.append(
             ReuseRow(
@@ -269,9 +290,24 @@ def audit_text(text: str, path: str, mode: str = "strict") -> list[Violation]:
         )
         return out
 
-    if not audit.rows:
+    if not audit.rows and not audit.malformed:
         out.append(Violation(path, 1, "复用调研", "章节存在但没有数据行"))
         return out
+
+    # 列数不符的行必须报出来。旧实现里它们被 `continue` 静默丢弃，
+    # 于是「0 违规」既可能是「都合规」也可能是「有问题但被吞了」，无法区分。
+    # 放在「没有数据行」之前：整张表都列数不符时，报「行格式错」比报
+    # 「没有数据行」更接近真相，也才指得出该改哪一行。
+    for lineno, actual, expected in audit.malformed:
+        out.append(
+            Violation(
+                path,
+                lineno,
+                "复用调研",
+                f"表格行有 {actual} 列，应为 {expected} 列："
+                "多半是单元格里含未转义的竖线，该行已被跳过，需转义为 `\\|`",
+            )
+        )
 
     for row in audit.rows:
         out.extend(_check_row(row, path, mode))

@@ -594,3 +594,111 @@ def test_remote_disconnected_is_treated_as_transient(monkeypatch):
     assert stars is None and lic == ""
     assert err == "RemoteDisconnected"
     assert reuse.is_transient(err) is True
+
+
+# ── 2026-11-27 对抗性评审挖出的两个真 bug ─────────────────────
+#
+# 这两个比"词表不够"严重得多：它们让检查在用户不知情的情况下静默失效。
+# 静默失效比不检查更糟——你以为查了，其实没查。
+
+
+def _seven_row(
+    component: str = "某组件", reason: str = "检索过同类项目无现成可复用"
+) -> str:
+    return f"| {component} | owner/repo | 1000 | MIT | 复用 | proot | {reason} |"
+
+
+def test_列数不符的表格行要报错_不要静默丢弃():
+    """bug：parse_audit 里 `if len(cells) != len(COLUMNS): continue`。
+
+    行里多一个 `|`（或 Markdown 转义 `\\|`）会让整行消失，
+    然后「0 违规」——而 0 违规与「这行有问题」在输出上完全一样，无法区分。
+    静默丢弃让「45 行合规」只能证明「解析出 45 行」，不能证明「文档里 45 行都合规」。
+    """
+    from tools.doc_checks import reuse
+
+    # 第 7 列理由里含未转义的竖线 → 切出 8 个单元格
+    text = "\n".join(
+        [
+            "# 文档",
+            "",
+            "## 复用调研",
+            "",
+            "| 组件 | 候选 | 星数 | 许可 | 结论 | 运行环境 | 理由 |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| 组件A | owner/repo | 1000 | MIT | 复用 | proot | 理由含 A|B 两个 |",
+            "",
+            "## 下一节",
+            "",
+        ]
+    )
+
+    audit = reuse.parse_audit(text)
+    # 这一行不能被无声吞掉：要么解析成一行，要么记进 malformed
+    total = len(audit.rows) + len(audit.malformed)
+    assert total >= 1, "列数不符的行被静默丢弃了：既没进 rows 也没进 malformed"
+
+    # 而且必须真的报成违规，否则等于没记
+    violations = reuse.audit_text(text, "docs/tech/x.md")
+    assert any("列" in str(v) for v in violations), (
+        f"列数不符没有转成违规：{violations}"
+    )
+
+
+def test_解析出的行数要与表格实际行数一致():
+    """更强的形式：三行数据都应被解析出来，一个都不能少。"""
+    from tools.doc_checks import reuse
+
+    header = "| 组件 | 候选 | 星数 | 许可 | 结论 | 运行环境 | 理由 |"
+    sep = "| --- | --- | --- | --- | --- | --- | --- |"
+    rows = [
+        "| A | owner/a | 100 | MIT | 复用 | proot | 检索过同类的项目 |",
+        "| B | owner/b | 200 | MIT | 复用 | proot | 检索过同类的项目 |",
+        "| C | owner/c | 300 | MIT | 复用 | proot | 检索过同类的项目 |",
+    ]
+    text = "\n".join(["# 文档", "", "## 复用调研", "", header, sep, *rows, ""])
+
+    audit = reuse.parse_audit(text)
+
+    assert len(audit.rows) == 3, f"只解析出 {len(audit.rows)} 行，应有 3 行"
+
+
+def test_子目录里的技术文档也要按_strict_校验():
+    """bug：mode_for 用 `p.parent.name`，只认一层。
+
+    docs/tech/a.md      → strict（父目录叫 tech）
+    docs/tech/2026/a.md → None（父目录叫 2026）→ 整条检查静默放行
+
+    按主题或年份建子目录是很自然的组织方式，一旦这么做检查就悄悄不查了，
+    而且没有任何「未检查」的输出。规则要长期有效、要跨项目复用，
+    就不能靠「别建子目录」这种口头约定。
+    """
+    from tools.doc_checks import reuse
+
+    assert reuse.mode_for("docs/tech/a.md") == "strict"
+    assert reuse.mode_for("docs/tech/2026/a.md") == "strict", (
+        "docs/tech 的子目录里必须仍是 strict，否则检查静默失效"
+    )
+    assert reuse.mode_for("docs/x/y/a.md") is None, "docs 之外的目录不该被校验"
+
+
+def test_子目录里的文件真的会被报违规():
+    """端到端：子目录路径下，缺星数的行必须真的报出来。"""
+    from tools.doc_checks import reuse
+
+    text = "\n".join(
+        [
+            "# 文档",
+            "",
+            "## 复用调研",
+            "",
+            "| 组件 | 候选 | 星数 | 许可 | 结论 | 运行环境 | 理由 |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| A | owner/a | 不是数字 | MIT | 复用 | proot | 检索过同类的项目 |",
+            "",
+        ]
+    )
+
+    violations = reuse.audit_text(text, "docs/tech/2026/x.md")
+
+    assert violations, "子目录路径下应当校验并报出星数不是数字"
