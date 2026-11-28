@@ -32,6 +32,8 @@ from kb.ai.outcomes import (
     SummarizeSkipped,
 )
 from kb.ai.validate import validate_tags
+from kb.media import persist, plan
+from kb.store import attachments as attachments_store
 from kb.store import items as items_store
 from kb.store import jobs as jobs_store
 from kb.store import tags as tags_store
@@ -53,6 +55,13 @@ def _outcome_to_kwargs(item_url: str, outcome: Any) -> dict[str, Any]:
     翻译放在 worker 而不是 store：store 不该知道怎么从一个 URL 抓东西，
     也不该知道 `ExtractOutcome` 这个类型存在。两边只靠「一条记录的字段」
     这个朴素契约耦合。
+
+    **`thumbUrl` / `width` / `height` 三个字段必须传**（设计 §0.2 缺口二）：
+    原来的实现只传 `url` / `ext` / `durationSec`，于是封面的 URL 在 worker
+    边界上就已经丢了——即便下游写对了，`thumb_url` 也到不了
+    （`kb/media/plan.py` 靠 `thumbUrl` 合成 `role='cover'`）。
+    真机实测抖音视频的 `media` 只有一条 `role='video'`，封面只在 `thumb_url` 里，
+    漏传这一个字段的后果是**封面一张都下不到**。
     """
     del item_url  # 签名保留是为了将来「按 URL 分支」时有位置可放
     if outcome.ok and outcome.data is not None:
@@ -63,18 +72,44 @@ def _outcome_to_kwargs(item_url: str, outcome: Any) -> dict[str, Any]:
             "title": data.title,
             "content_text": data.content_text,
             "platform": data.platform,
-            "media": [
-                {
-                    "url": media.url,
-                    "ext": media.ext,
-                    "durationSec": media.duration_sec,
-                }
-                for media in data.media
-            ],
+            "media": [_media_to_dict(media) for media in data.media],
             "error": "",
         }
     # 抓不到时也算「处理完了」，但要把原因写下来，界面才能显示「处理失败，可重试」
     return {"ok": False, "error": outcome.error or "抓取失败（无原因）"}
+
+
+#: 抓取层 `MediaItem` → 落库/下载层认的 dict。**camelCase 键**与
+#: `store.items.apply_extract` 收的 `durationSec` 保持一致（worker 是唯一翻译者，
+#: 两边命名必须对齐，否则「传了但没读到」这种错在两边都不会报）。
+#:
+#: `role` **必须在里面**：`kb/media/plan.py` 靠它区分「这条是图片还是视频」，
+#: 而视频的 url 本轮**不下**（PRD M4-07 P2）。漏掉 role 的后果是
+#: `_image_urls` 一条都匹配不到 → 图文内容永远没有封面和配图，而且
+#: 日志里只有一句「specs 为空」，看起来像「这条内容本来就没图」。
+#: **真机验证抓到的**：抖音图文（`v.douyin.com/5gjBAuYo7PE`）在这个 bug 下
+#: 产出的 `specs` 是空的。
+_MEDIA_KEYS = ("role", "url", "ext", "thumbUrl", "width", "height", "durationSec")
+
+
+def _media_to_dict(media: Any) -> dict[str, object]:
+    """单条媒体 → dict。`thumbUrl` 为 `None` 时**不放进 dict**。
+
+    不放 `None` 而不是放：`plan.py` 用 `media.get('thumbUrl')` 判断有无封面，
+    `None` 与「键不存在」在它那儿等价，但「不出现」让 `props` 的 jsonb 更小、
+    也让「这条内容到底有没有封面」在库里读得出来。
+    """
+    out: dict[str, object] = {
+        "role": media.role,
+        "url": media.url,
+        "ext": media.ext,
+        "width": media.width,
+        "height": media.height,
+        "durationSec": media.duration_sec,
+    }
+    if media.thumb_url:
+        out["thumbUrl"] = media.thumb_url
+    return {key: out[key] for key in _MEDIA_KEYS if key in out}
 
 
 def run_fetch(
@@ -83,19 +118,37 @@ def run_fetch(
     job_id: int,
     *,
     extractor: Any,
+    media_stage: Any = None,
 ) -> None:
     """抓取一步。**URL 判空只在这里做**（`AI-11`）。
 
     成功判据是 `ExtractOutcome.ok`（`AI-07`）。成功时：
 
-    1. `apply_extract` 写回 `items`
-    2. `mark_done`
-    3. `enqueue(item_id, "summarize")`
+    1. `apply_extract` 写回 `items`（元数据先落库——即使后面媒体全失败，
+       这条内容已经可用）
+    2. **媒体阶段**：`plan_attachments` → `store_media` → `replace_for_item`
+    3. `mark_done`
+    4. `enqueue(item_id, "summarize")`
 
     **顺序不能反**（设计 §0 第 9 条）：反过来在 `mark_done` 失败时会留下一条
     已完成的上游 + 一条待办的下游，重跑上游会产生两条 `pending`，被
     `jobs_pending_uniq` 挡成一条——结果正确但排障时看不出发生过重跑。
     按本顺序最坏情况是「上游 done、下游缺失」，`C1` 会在 60 秒内直接暴露。
+
+    ## 媒体阶段失败怎么办
+
+    **fetch 仍算成功。** 三层落地：单条媒体失败进 `props.mediaError`、
+    全部失败同上、整个阶段抛未预期异常也同上且 `log.exception`。
+    理由见 `items_store.set_media_props` 的 docstring：`derive_status` 看到任意
+    job failed 就把条目显示成「处理失败」，而一张封面没下下来不该让用户去点重试。
+
+    ## `media_stage` 参数
+
+    类型是 `Any`（默认 `None` = 不下载媒体）而不是 `kb.media.MediaStage`：
+    本层只把它转手传给 `kb.media.persist.store_media`，不需要知道
+    `Downloader` / `ImageEncoder` / `Resolver` 的存在。`None` 时整个阶段跳过
+    ——这让 11 处现有 `run_once(pool, extractor)` 的调用**一行都不用改**，
+    也不会突然开始联网下载。
     """
     detail = items_store.get_item(conn, item_id)
     url = "" if detail is None else (detail.url or "")
@@ -117,18 +170,90 @@ def run_fetch(
         jobs_store.mark_failed(conn, job_id, reason)
         return
 
-    items_store.apply_extract(conn, item_id, **_outcome_to_kwargs(url, outcome))
+    kwargs = _outcome_to_kwargs(url, outcome)
+    items_store.apply_extract(conn, item_id, **kwargs)
 
     if not outcome.ok:
         jobs_store.mark_failed(conn, job_id, outcome.error or "抓取失败")
+        # C2：失败时不入队 summarize——没有内容可摘要。
+        # 同时清掉上一次的封面：那张图属于上一版内容，留着会让用户看到错图。
+        items_store.clear_media_props(conn, item_id)
         log.info("抓取失败 item=%s: %s", item_id, outcome.error)
-        # C2：失败时不入队 summarize——没有内容可摘要
         return
+
+    _download_media(conn, item_id, kwargs.get("media") or [], media_stage=media_stage)
 
     jobs_store.mark_done(conn, job_id)
     jobs_store.enqueue(conn, item_id, "summarize")
     log.info(
         "抓取完成 item=%s job=%s step=fetch kind=%s", item_id, job_id, outcome.kind
+    )
+
+
+def _download_media(
+    conn: Conn,
+    item_id: int,
+    media_items: list[dict[str, object]],
+    *,
+    media_stage: Any,
+) -> None:
+    """阶段二：规划 → 下载落盘 → 落库 → 写 props。**任何失败不污染 `jobs`。**
+
+    ## 四步顺序
+
+    1. `plan_attachments`（纯函数，不联网）
+    2. `store_media`（联网 + 写盘，**不碰数据库**）
+    3. `replace_for_item`（写 attachments，单条 WITH 语句）
+    4. `primary_media_id` + `set_media_props`（写 items）
+
+    第 2 步抛未预期异常时第 3/4 步跳过，但 `props.mediaError` 仍要写
+    ——「整段炸了」与「单条 404」对用户是同一件事：没有封面可用。
+
+    ## `media_stage is None` 时什么都不做
+
+    这是「装配件未注入」。理由同 `run_fetch` 的 `media_stage` 参数说明：
+    现有 11 处调用不该因为本轮新增媒体能力就突然开始联网。
+    """
+    if media_stage is None:
+        return
+
+    specs = plan.plan_attachments(media_items, kind="")
+    if not specs:
+        # 没有封面也没有配图。**显式清空**上一次的媒体状态：内容可能从
+        # 视频改成了纯文字，旧封面留着会让卡片显示一张与内容无关的图。
+        items_store.set_media_props(
+            conn, item_id, primary_media=None, media_error="", media_truncated=0
+        )
+        return
+
+    try:
+        result = media_stage.run(specs, item_id=item_id)
+    except Exception:  # noqa: BLE001 媒体阶段整段异常不污染 jobs，见 docstring
+        log.exception("媒体阶段异常 item=%s", item_id)
+        items_store.set_media_props(
+            conn,
+            item_id,
+            primary_media=None,
+            media_error="媒体下载阶段异常（详见 worker 日志）",
+            media_truncated=0,
+        )
+        return
+
+    if result.stored:
+        written = attachments_store.replace_for_item(conn, item_id, list(result.stored))
+        log.info(
+            "媒体落库 item=%s 写入 %d 行（跳过 %d 条）",
+            item_id,
+            written,
+            len(result.skipped),
+        )
+    primary = attachments_store.primary_media_id(conn, item_id)
+    items_store.set_media_props(
+        conn,
+        item_id,
+        primary_media=primary,
+        media_error=persist.summarize_skipped(result.skipped),
+        media_truncated=plan.dropped_images(media_items, specs),
     )
 
 

@@ -73,6 +73,23 @@ def build_ai_client() -> Any:
     return build_client(AiConfig(base_url="", api_key="", model=""))
 
 
+def build_media_stage() -> Any:
+    """构造媒体阶段装配件。**缺 Pillow/httpx 时不让 worker 起不来。**
+
+    `PillowEncoder` 与 `HttpxDownloader` 的库都在方法体内 import
+    （`encode.normalize` / `fetch.get`），所以这里构造永远不会抛——缺包的失败
+    会落在真正下载那一刻，带明确原因进 `props.mediaError`。
+
+    这条口径与 `ensure_ai_available()` 不同，而且不一致是**有意的**：
+    AI 缺 httpx 时整个摘要步骤都跑不了，早退一次比「任务一直 pending」好排障；
+    而媒体缺包只影响封面，正文摘要照常能用——为一张封面拒绝启动是过度反应。
+    """
+    from kb.media import persist
+    from kb.media.config import media_root_from_env
+
+    return persist.production_stage(media_root_from_env())
+
+
 # 心跳间隔。必须小于 api 侧 WORKER_STALE_AFTER（90 秒），
 # 否则 worker 明明在跑也会被报成 false。留 3 倍余量给偶发的慢抓取。
 HEARTBEAT_SECONDS = 30.0
@@ -155,9 +172,21 @@ def main(argv: list[str] | None = None) -> int:
     # 任务一直 pending 而 health 报 workerOk:true。
     ensure_ai_available()
     ai_client = build_ai_client()
+    media_stage = build_media_stage()
 
     pool = Pool(PgConfig.from_env())
     stop = threading.Event()
+
+    # 启动时清一次 `.incoming/`：上次被 kill 留下的 `.part` 与正式文件同目录，
+    # `attachments.stats()` 看不到，会悄悄吃掉磁盘。失败不阻止 worker 起来。
+    try:
+        from kb.media import persist as media_persist
+
+        cleaned = media_persist.clean_incoming(media_stage.media_root)
+        if cleaned:
+            log.info("清理媒体临时文件 %d 个", cleaned)
+    except Exception:  # noqa: BLE001 启动清理失败不影响 worker 干活
+        log.exception("媒体临时文件清理失败")
 
     # 先写一次心跳再启动循环：否则最长要等 30 秒 health 才转绿，
     # 那段时间里运维会以为 worker 没起来。
@@ -178,9 +207,14 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(sig, _on_signal)
 
     log.info("worker 启动，idle=%.1fs 心跳=%.0fs", args.idle, HEARTBEAT_SECONDS)
+    log.info("媒体目录：%s", media_stage.media_root)
     try:
         run_forever(
-            pool, default_extractor(), idle_seconds=args.idle, ai_client=ai_client
+            pool,
+            default_extractor(),
+            idle_seconds=args.idle,
+            ai_client=ai_client,
+            media_stage=media_stage,
         )
     except KeyboardInterrupt:
         pass

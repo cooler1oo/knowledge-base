@@ -87,12 +87,18 @@ def run_once(
     pool: Any,
     extractor: Callable[[str], Coroutine[Any, Any, ExtractOutcome]],
     ai_client: SummarizerPort | None = None,
+    media_stage: Any = None,
 ) -> bool:
     """处理一条任务。做了事返回 True，队列空返回 False。
 
     `ai_client` 加在**第三个位置且默认 `None`**（`§4.2.1`）：现有 11 处
     `loop.run_once(pool, extractor)` 两个位置参数的调用**一行都不用改**。
     改成必填或插在 `extractor` 之前都会让那 11 处红。
+
+    `media_stage` 同理放在**最后且默认 `None`**：它是 R8 新增的媒体阶段装配件，
+    `None` 表示「本轮不下载媒体」。默认 `None` 这条不是保守，是必要的——
+    现有 11 处调用与全部 `tests/test_worker_loop.py` 的用例都不该因为
+    「worker 新增了下载能力」就突然开始联网。
 
     所有异常都在这里收掉：调用方（`run_forever`）的循环不能因为一条坏数据退出。
     唯一会往外抛的是「数据库本身连不上」——那种情况继续转也没意义。
@@ -120,7 +126,13 @@ def run_once(
         # 分派在 URL 判空之前（AI-11）。每个分支自己决定要不要 URL。
         try:
             if step == "fetch":
-                steps.run_fetch(conn, item_id, job_id, extractor=extractor)
+                steps.run_fetch(
+                    conn,
+                    item_id,
+                    job_id,
+                    extractor=extractor,
+                    media_stage=media_stage,
+                )
             elif step == "summarize":
                 steps.run_summarize(
                     conn,
@@ -148,6 +160,7 @@ def run_forever(
     idle_seconds: float = IDLE_SECONDS,
     on_tick: Callable[[], None] | None = None,
     ai_client: SummarizerPort | None = None,
+    media_stage: Any = None,
 ) -> None:
     """一直跑。`on_tick` 每轮调一次，用来写心跳。
 
@@ -155,11 +168,14 @@ def run_forever(
     `idle_seconds`，而把 `ai_client` 插在 `extractor` 之后（第三个位置）会让
     `run_forever(pool, extractor, 2.0)` 这类写法把浮点数当客户端传进去。
 
+    `media_stage` 同样放最后：它在**语义上**是另一个可选装配件，
+    与 `ai_client` 并列，都只影响对应步骤的行为。
+
     队列空时 sleep，不是忙等——忙等会把 CPU 占满且日志刷屏。
     """
     while True:
         try:
-            handled = run_once(pool, extractor, ai_client)
+            handled = run_once(pool, extractor, ai_client, media_stage)
         except Exception:  # noqa: BLE001 数据库级异常记一笔再继续，不让进程退出
             log.exception("worker 单轮失败，2 秒后重试")
             handled = True  # 避免立刻进入 sleep=False 的紧循环

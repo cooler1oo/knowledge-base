@@ -591,3 +591,92 @@ def set_ai_tag_ambiguous(
         i=item_id,
         p=json.dumps({"aiTagAmbiguous": ambiguous}, ensure_ascii=False),
     )
+
+
+# ── 媒体下载的落库收尾（R8）──────────────────────────────────
+#
+# 为什么单独两个函数而不复用 `apply_extract`：那条 SQL 写 title / content_text /
+# kind / props(**覆盖式合并 mediaProps**)，而媒体阶段在它之后跑，
+# 走它会把这些字段重新写一遍（内容已经对了，但 `props` 里 mediaCount 等会被
+# 同一批值覆盖——看起来无害，实际会在「重跑 fetch 带不同媒体」时把上一批
+# 的 mediaError 抹成空）。分开写让两阶段的写入范围各自封闭。
+
+
+def set_media_props(
+    conn: pg8000.native.Connection,
+    item_id: int,
+    *,
+    primary_media: int | None,
+    media_error: str,
+    media_truncated: int,
+) -> None:
+    """写媒体阶段的三样产出：`primary_media` / `props.mediaError` / `props.mediaTruncated`。
+
+    ## 三个字段各自的语义
+
+    - `primary_media`：**「这条内容用来做展示图的那张附件」**，不是「视频附件」。
+      视频条目指向**封面**。语义写错，M7-01 的卡片会拿不到图。
+      `None` 表示没有封面（文章或无封面内容）——显式写 `null` 而不是「不写」：
+      「上次有、这次没有」必须让旧值消失，否则卡片会显示一张与内容无关的图。
+    - `props.mediaError`：**空串表示这次全部成功**，此时必须**删掉**这个键。
+      `||` 只覆盖同名键、不删旧键，所以成功路径要显式 `- 'mediaError'`——
+      不删的话，修好一次之后界面会一直显示「封面未能下载」。
+    - `props.mediaTruncated`：被 20 张上限截掉的图片数。0 表示没截断，此时同样删键。
+
+    ## 为什么**不写 `jobs.error`**
+
+    `derive_status` 只要看到任意 job 是 `failed` 就把条目显示成「处理失败」。
+    封面下载失败与「正文没抓到」是完全不同量级的事——前者不影响这条内容可用。
+    为了把前者也标红，用户会对一堆本来能读的条目点重试，每次重试都重新走一遍
+    ParseHub（10–20 秒 + 上游风控风险），而**本轮根本没有重试端点**。
+    """
+    payload: dict[str, object] = {}
+    if media_truncated > 0:
+        payload["mediaTruncated"] = media_truncated
+
+    conn.run(
+        "update items set "
+        " primary_media = :pm, "
+        # ⚠️ `- 'mediaTruncated'` 这一句不能删，也不能挪到 `||` 之后。
+        #
+        # `payload` 只在本次**有截断**（`media_truncated > 0`）时才带这个键，
+        # 所以「上次截了 15 张、这次一张没截」时 `||` 不会覆盖它 —— 旧值会
+        # 一直留在 `props` 里，界面永远显示「已截断 15 张」，而实际上这次
+        # 全存下了。用户会以为丢了图。
+        #
+        # 必须**先无条件删**再 `||` 合并新值：
+        #   - 本次没截断 → payload 无此键 → 删掉之后就是「没有这个键」（正确）
+        #   - 本次有截断 → payload 有此键 → `||` 写回新值（正确）
+        #
+        # `mediaError` 走 `case` 三态（删/写），`mediaTruncated` 走「先删后
+        # 合并」二态 —— 两者形态不同是因为前者有三态语义（本次成功/本次失败/
+        # 本次没跑媒体阶段），后者只有两种（截了 N 张 / 没截）。
+        " props = ((case when :err = '' then props - 'mediaError' "
+        "                else props || cast(:e as jsonb) end) "
+        "          - 'mediaTruncated') "
+        "         || cast(:p as jsonb), "
+        " updated_at = now() "
+        "where id = :i",
+        i=item_id,
+        pm=primary_media,
+        err=media_error,
+        e=json.dumps({"mediaError": media_error}, ensure_ascii=False),
+        p=json.dumps(payload, ensure_ascii=False),
+    )
+
+
+def clear_media_props(conn: pg8000.native.Connection, item_id: int) -> None:
+    """把 `primary_media` 置空并删掉两个媒体错误键。
+
+    用在哪：抓取失败（`ok=False`）时不该留着上一次的封面与错误串——
+    上次的封面属于上一版内容，留着会让用户看到一张错的图。而这次没有媒体
+    阶段可跑（`run_fetch` 在 `not outcome.ok` 时直接 return）。
+    """
+    conn.run(
+        "update items set "
+        " primary_media = null, "
+        " props = props - 'mediaError' - 'mediaTruncated', "
+        " updated_at = now() "
+        "where id = :i",
+        i=item_id,
+    )
