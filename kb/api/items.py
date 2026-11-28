@@ -1,10 +1,18 @@
-"""`/api/items` 三个端点的 handler 工厂。
+"""`/api/items` 四个端点的 handler 工厂。
 
 为什么是工厂函数：`pool` 要在启动时注入，而 Starlette 的路由表是模块级构造的。
 闭包捕获 `pool` 与 `app.py` 现有写法一致，不需要引入依赖注入框架。
 
 这一层只做三件事：解析请求、校验、把结果序列化。SQL 全在 `kb/store/`——
 架构检查会在提交时拦住任何写在 api 层的写库语句。
+
+## `edit` 端点（M3-08 T04）
+
+`PATCH /api/items/{id}` 本轮**只允许改 `kind`**。它是「把用户的修正记下来」
+这条链路唯一缺的那一环——没有它，`domain_type_rules` 里的规则永远不会被写入，
+M3-08 整条需求就是死代码。
+
+完整编辑界面（改标题、正文、标签）留给前端阶段由 M5-07 覆盖，本轮不做。
 """
 
 from __future__ import annotations
@@ -16,7 +24,10 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from kb.extract.normalize import domain_of
+from kb.store import domain_rules
 from kb.store import items as items_store
+from kb.store import jobs as jobs_store
 from kb.store.db import Pool
 
 Handler = Callable[[Request], Awaitable[Response]]
@@ -220,5 +231,106 @@ def detail(pool: Pool) -> Handler:
                 "jobs": job_rows,
             }
         )
+
+    return handler
+
+
+# ── M3-08 T04：修正类型并记住 ────────────────────────────────
+
+
+async def _edit(request: Request, pool: Pool) -> Response:
+    """`PATCH /api/items/{id}`：改类型，**并把这个修正记成域名规则**。
+
+    ## 为什么改一次要同时写两张表
+
+    M3-08 的判据是「类型修正被记住」。只改 `items.kind` 的话，用户改完这一条，
+    下次存同一个域名的链接还是错判——那条需求等于没做。
+
+    所以本函数在一次连接里做两件事：
+
+    1. `items.set_kind` —— 改这一条
+    2. `domain_rules.remember` —— 记住「这个域名该是什么」
+
+    **顺序不能反**：先改条目再写规则。反过来的话，规则写成功而改条目失败时，
+    库里会留下一条「用户从没成功修正过、但规则已生效」的状态——之后所有
+    同域名的新内容都被悄悄改判，而用户以为自己的操作失败了。
+
+    反过来最坏情况是「这条改了、规则没记住」，用户下次再改一次就好，
+    而且他看得见这条确实变了。错误方向选「少记住一次」而不是「记住错的地方」。
+
+    ## `domain_of` 为空时不写规则
+
+    纯文字条目（无 URL）改类型是合法的，但没有域名可记——`remember` 对空
+    domain 会抛 `ValueError`。所以那一步要跳过，不是把空串写进表。
+
+    ## 为什么要 enqueue index
+
+    索引里存着 `kind`，而它是可筛选字段（`/api/search?kind=video`）。
+    改了 `items.kind` 而不重写索引，用户按新类型筛会**搜不到这条**——
+    数据是对的，搜索结果是错的，且不报错。设计文档「改
+    title/summary/content_text/ocr_text/tags/kind/read_status 都必须 enqueue
+    index」这条规则就是为这种情况写的。
+    """
+    try:
+        item_id = int(str(request.path_params.get("item_id")))
+    except (TypeError, ValueError):
+        return _error("id 必须是整数")
+
+    try:
+        payload = await _json_body(request)
+    except ValueError as exc:
+        return _error(str(exc))
+
+    if "kind" not in payload:
+        return _error("只支持改 kind；请求体要含 kind 字段")
+    raw_kind = payload["kind"]
+    if not isinstance(raw_kind, str) or not raw_kind.strip():
+        return _error("kind 必须是非空字符串")
+    kind = raw_kind.strip()
+
+    with pool.connection() as conn:
+        # 先确认这条存在。不查的话，改一条不存在的记录会得到
+        # 「未知的类型」或「成功」——前者误导，后者更糟（谎报成功）。
+        item = items_store.get_item(conn, item_id)
+        if item is None:
+            return _error("没有这条", 404)
+
+        # `remember` 顺带做了 kind 合法性校验（并给出候选值列表）。
+        # 先调它而不是先 `set_kind`：非法 kind 应该**什么都没改**就返回 400，
+        # 而不是「条目改了、规则没记住」留个半截状态。
+        domain = domain_of(item.url or "")
+        try:
+            if domain:
+                domain_rules.remember(conn, domain, kind)
+        except domain_rules.UnknownKindError as exc:
+            # 400 不是 500：用户传了个不存在的类型，这是输入问题。
+            # 消息里带候选值（`UnknownKindError` 已经拼好了）。
+            return _error(str(exc))
+        except ValueError as exc:
+            # 空 domain 之类。理论上进不来（上面 `if domain` 已挡），
+            # 但留一条明确的 400 比让它冒成 500 好。
+            return _error(str(exc))
+
+        if not items_store.set_kind(conn, item_id, kind=kind):
+            # 查询与更新之间被删了（极窄的竞态）。仍要如实告诉用户没改成。
+            return _error("没有这条", 404)
+
+        # 改完必须重写索引：`kind` 是可筛选字段，不重写会让「按新类型筛」
+        # 搜不到这条——数据对、搜索结果错、且不报错。
+        jobs_store.enqueue(conn, item_id, "index")
+
+    body: dict[str, object] = {
+        "id": item_id,
+        "kind": kind,
+        "rememberedDomain": domain or None,
+    }
+    return JSONResponse(body)
+
+
+def edit(pool: Pool) -> Handler:
+    """`PATCH /api/items/{item_id}`。最小版：只改 `kind`。"""
+
+    async def handler(request: Request) -> Response:
+        return await _edit(request, pool)
 
     return handler

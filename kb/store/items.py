@@ -736,3 +736,36 @@ def clear_media_props(conn: pg8000.native.Connection, item_id: int) -> None:
         "where id = :i",
         i=item_id,
     )
+
+
+def set_kind(conn: pg8000.native.Connection, item_id: int, *, kind: str) -> bool:
+    """改一条内容的类型。返回**是否真的改到了**（`False` = 没有这条）。
+
+    ## kind 合法性由调用方先查（`domain_rules.remember` 里就查了）
+
+    这里只写库。不在本函数里再查一次 `item_kinds`，理由：修类型这个动作
+    **必然**同时调 `domain_rules.remember`（否则用户改了不会被记住，M3-08
+    就是空的），而那个函数已经校验过。两处都查是两次往返，且第二次与第一次
+    的空隙里表可能变——错误消息会与校验结果不一致。
+
+    外键（`items.kind references item_kinds`）仍是最后一道防线：万一将来
+    有人绕过 remember 直接调本函数，数据库会拒绝，不会静默写入脏值。
+
+    ## 为什么不用 `returning`
+
+    `update ... returning id` 与单独查一次等价，但 `row_count` 在 pg8000 上
+    的行为版本间有差异（1.31.6 有，更早的没有），而 `returning` 是 SQL 标准、
+    语义自证。与 `domain_rules.forget` 同一手法。
+
+    ## 不改 `updated_at` 之外的东西
+
+    改类型不影响标题、正文、标签——那些是「内容」，kind 是「归类」。
+    但 `updated_at` 要动：它是「这条记录最后一次被用户操作」的依据，
+    将来做「最近整理过的」列表要靠它。
+    """
+    rows = conn.run(
+        "update items set kind = :k, updated_at = now() where id = :i returning id",
+        k=kind,
+        i=item_id,
+    )
+    return bool(rows)

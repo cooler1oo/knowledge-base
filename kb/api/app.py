@@ -215,6 +215,15 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
         Route("/api/ai/usage", ai_api.usage(pool)),
         Route("/api/items", items_api.create_or_list(pool), methods=["POST", "GET"]),
         Route("/api/items/{item_id:int}", items_api.detail(pool)),
+        # M3-08 T04：修正类型并记住。**PATCH 单独注册一条路由**而不是给
+        # detail 那条加 methods：`detail` 是纯读、不读 body，把写混进去
+        # 会让「GET 与 PATCH 的行为差异」藏在一个 handler 的两个分支里。
+        # 本轮只支持改 kind（完整编辑界面留给 M5-07）。
+        Route(
+            "/api/items/{item_id:int}",
+            items_api.edit(pool),
+            methods=["PATCH"],
+        ),
         # 检索（E-18 / E-20 / M6-01…M6-03、M6-05）。
         # **刻意不加入 PUBLIC_PATHS**：搜索会返回库里的标题、摘要与标签，
         # 未登录请求不该看到这些内容——不在白名单里即自动走会话中间件，401。
