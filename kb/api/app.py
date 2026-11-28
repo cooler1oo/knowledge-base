@@ -31,6 +31,7 @@ from . import ai as ai_api
 from . import auth, health, pages
 from . import items as items_api
 from . import media as media_api
+from . import search as search_api
 
 PUBLIC_PATHS = frozenset(
     {"/login", "/api/auth/login", "/api/auth/bootstrap", "/api/health", "/favicon.ico"}
@@ -42,11 +43,19 @@ MAX_USERNAME_LEN = 64
 
 class AppConfig:
     def __init__(
-        self, meili_url: str, media_root: Path, cookie_secure: bool = False
+        self,
+        meili_url: str,
+        media_root: Path,
+        cookie_secure: bool = False,
+        meili_key: str = "",
     ) -> None:
         self.meili_url = meili_url
         self.media_root = media_root
         self.cookie_secure = cookie_secure
+        # 检索密钥与 worker 读同一个环境变量名（设计 §10「环境变量」）。
+        # 传给 `/api/search` 的 handler 而不是留在全局：搜索路径要带
+        # `Authorization` 头，而 `/api/health` 的探针不需要（它只读 /health）。
+        self.meili_key = meili_key
 
     @classmethod
     def from_env(cls) -> AppConfig:
@@ -58,6 +67,7 @@ class AppConfig:
             # 本机 http://127.0.0.1 调试时带 Secure 的 Cookie 不会被回传，故默认关
             cookie_secure=os.environ.get("KB_COOKIE_SECURE", "").lower()
             in {"1", "true", "yes"},
+            meili_key=os.environ.get("KB_MEILI_KEY", ""),
         )
 
 
@@ -205,6 +215,18 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
         Route("/api/ai/usage", ai_api.usage(pool)),
         Route("/api/items", items_api.create_or_list(pool), methods=["POST", "GET"]),
         Route("/api/items/{item_id:int}", items_api.detail(pool)),
+        # 检索（E-18 / E-20 / M6-01…M6-03、M6-05）。
+        # **刻意不加入 PUBLIC_PATHS**：搜索会返回库里的标题、摘要与标签，
+        # 未登录请求不该看到这些内容——不在白名单里即自动走会话中间件，401。
+        #
+        # `meili_url` / `meili_key` 从 `cfg` 传进去，不让 handler 自己读环境变量：
+        # 那样 `AppConfig.from_env` 会变成「读了一份但没人用」，
+        # 「部署时没配 KB_MEILI_KEY」就只能在真机上以 401 的形式暴露
+        # （2026-11-28 真机踩过：api 进程没有 key，搜索全部降级成 fallback）。
+        Route(
+            "/api/search",
+            search_api.search(pool, meili_url=cfg.meili_url, meili_key=cfg.meili_key),
+        ),
         # 媒体读取（M2-03 / M7-01）。**路由必须写 `{key:path}`**：`storage_key`
         # 按定义带一个 `/`（`ab/cdef….jpg`），写成 `{key}` 的正则是
         # `^/api/media/(?P<key>[^/]+)$`，永远匹配不上——现象是「所有媒体都 404」，
