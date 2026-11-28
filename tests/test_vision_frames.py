@@ -581,3 +581,131 @@ def test_meta与scan原样带在结果里(tmp_path) -> None:
     assert frame_set.meta.duration_sec == 60.0
     assert frame_set.meta.fps == 25.0
     assert frame_set.scan.truncated is False
+
+
+# ── Cv2Grabber.encode 的纯算术部分 ────────────────────────────
+#
+# `encode` 里只有「缩放」与「参数校验」是纯算术：给它一个 numpy 数组就能测，
+# 不需要真视频文件，也不需要解码器。真解码（probe / read_at）仍只能靠探针验。
+#
+# 这一段补上的理由：`long_side` 是**上限**不是目标尺寸，写成「一律缩到
+# long_side」对小图会放大，对字幕是实打实的清晰度损失；而放大后不报错，
+# 只是图变糊。这种错只能靠断言尺寸发现。
+#
+# `np` 与 `cv2` 在函数内 import：本文件的其余用例不许依赖它们（那部分是
+# 假实现跑的快路径），所以只有这一段需要真库时再引入，模块顶层保持干净。
+
+
+def _cv2():
+    """拿 cv2 与 numpy。没装就跳过——本文件的其余用例不受影响。"""
+    import numpy
+
+    cv2 = pytest.importorskip("cv2")
+    return cv2, numpy
+
+
+def _solid_image(height: int, width: int):
+    """造一张纯色 FrameImage，只要尺寸正确就能测缩放。"""
+    _cv2mod, np = _cv2()
+    from kb.vision.models import FrameImage
+
+    return FrameImage(
+        data=np.full((height, width, 3), 128, dtype=np.uint8),
+        width=width,
+        height=height,
+        mean_luma=128.0,
+        std_luma=0.0,
+    )
+
+
+def _decoded_size(data: bytes) -> tuple[int, int]:
+    """把 JPEG 字节解回 (高, 宽)，用来断言真的缩到了目标尺寸。"""
+    cv2, np = _cv2()
+    arr = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert arr is not None, "编码出来的字节不是可解的 JPEG"
+    return int(arr.shape[0]), int(arr.shape[1])
+
+
+def test_encode竖屏超限缩到长边1024() -> None:
+    """1080x1920 竖屏（抖音常见）：长边 1920 → 缩到 1024，比例保持。"""
+    from kb.vision.grab import Cv2Grabber
+
+    data = Cv2Grabber().encode(_solid_image(1920, 1080), long_side=1024, quality=85)
+
+    assert _decoded_size(data) == (1024, 576), "长边要正好 1024，短边按比例"
+
+
+def test_encode横屏超限缩到长边1024() -> None:
+    """1920x1080 横屏（B 站常见）：长边是宽，缩完是 1024x576。"""
+    from kb.vision.grab import Cv2Grabber
+
+    data = Cv2Grabber().encode(_solid_image(1080, 1920), long_side=1024, quality=85)
+
+    assert _decoded_size(data) == (576, 1024)
+
+
+def test_encode小图不放大() -> None:
+    """`long_side` 是上限不是目标：80x100 的图不该被放大到 1024。
+
+    放大不报错，只是把字幕糊掉——这种错只能靠断言尺寸发现。
+    """
+    from kb.vision.grab import Cv2Grabber
+
+    data = Cv2Grabber().encode(_solid_image(80, 100), long_side=1024, quality=85)
+
+    assert _decoded_size(data) == (80, 100)
+
+
+def test_encode质量参数确实影响体积() -> None:
+    """用噪声图验，不能用纯色图。
+
+    纯色图几乎没有高频细节，JPEG 在 quality=30 与 95 下体积相同——
+    2026-11-28 先用纯色图测过一次，误判成「质量参数没生效」。
+    噪声图对量化步长敏感，体积随质量单调增，才能证明参数真的传下去了。
+    """
+    from kb.vision.grab import Cv2Grabber, FrameImage
+
+    cv2, np = _cv2()
+    del cv2
+    rng = np.random.default_rng(0)
+    noisy = FrameImage(
+        data=rng.integers(0, 256, (600, 800, 3), dtype=np.uint8),
+        width=800,
+        height=600,
+        mean_luma=128.0,
+        std_luma=70.0,
+    )
+
+    grabber = Cv2Grabber()
+    low = len(grabber.encode(noisy, long_side=1024, quality=30))
+    high = len(grabber.encode(noisy, long_side=1024, quality=95))
+
+    assert high > low, "quality 从 30 提到 95，体积必须变大"
+
+
+@pytest.mark.parametrize(
+    ("long_side", "quality", "match"),
+    [
+        (0, 85, "long_side"),
+        (-1, 85, "long_side"),
+        (1024, 0, "quality"),
+        (1024, 101, "quality"),
+    ],
+)
+def test_encode非法参数要报错(long_side, quality, match) -> None:
+    """越界参数在编码前拦掉，不要等到 cv2 给出含糊的失败。"""
+    from kb.vision.grab import Cv2Grabber
+
+    with pytest.raises(ValueError, match=match):
+        Cv2Grabber().encode(_solid_image(10, 10), long_side=long_side, quality=quality)
+
+
+def test_encode空帧数据要报错() -> None:
+    """`data=None` 是「帧没读到」的口径，不该静默编码出空字节。"""
+    from kb.vision.grab import Cv2Grabber, FrameReadFailed
+    from kb.vision.models import FrameImage
+
+    empty = FrameImage(data=None, width=10, height=10, mean_luma=0.0, std_luma=0.0)
+
+    with pytest.raises(FrameReadFailed):
+        Cv2Grabber().encode(empty, long_side=1024, quality=85)
