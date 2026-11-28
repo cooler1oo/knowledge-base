@@ -24,6 +24,7 @@ from kb.store.db import Pool
 from kb.store.settings import WORKER_HEARTBEAT_KEY
 
 from .loop import run_forever
+from .purge import purge_loop
 
 log = logging.getLogger(__name__)
 
@@ -216,6 +217,14 @@ def main(argv: list[str] | None = None) -> int:
 
     hb = threading.Thread(target=_heartbeat_loop, args=(pool, stop), daemon=True)
     hb.start()
+
+    # M4-03：回收站清扫。独立线程、独立连接，与主循环解耦——
+    # 与心跳同一理由：一次清扫要删几百行，占住主循环会让任务队列停摆。
+    # 启动时先跑一次（`purge_loop` 内部），否则停机多天后要等一小时才开始清。
+    purge_thread = threading.Thread(
+        target=purge_loop, args=(pool, stop, indexer), daemon=True
+    )
+    purge_thread.start()
 
     def _on_signal(_signum: int, _frame: object) -> None:
         log.info("收到退出信号，等待当前任务收尾")

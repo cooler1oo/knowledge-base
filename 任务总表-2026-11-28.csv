@@ -51,7 +51,7 @@
 50,E-44,工程,ENG,覆盖率底线 55%,工程,done,,当前 85%,pyproject.toml [tool.coverage.report]
 51,E-42,工程,DOC,技术方案 M2-03/M4-02 标记已实现,工程,done,,R8 轮补,docs/tech/2026-11-26-技术方案.md
 52,E-43,工程,DOC,每轮交接包（四项固定产出）,工程,done,,实测/偏离/已知坑/未完成,deliverables/construction/
-53,M4-03,需求,R8M,软删除 + 回收站，可恢复,P0,todo,,【进行中】T01 store 层七个函数已完成（kb/store/items.py）；T02 API 五端点、T03 索引联动+清扫线程、T04 探针与真库用例 未做。store 层按设计 §1.2 放在 items.py 而非新建 trash.py：「谁能写 items 行」只需读一个文件。,
+53,M4-03,需求,R8M,软删除 + 回收站，可恢复,P0,todo,,【进行中】T01 store 七函数、T02 API 五端点、T03 索引联动+清扫线程已完成；T04 探针与真库用例 未做。,
 54,E-24,工程,R9,数据自动备份（restic）,工程,todo,,无配置,—
 55,E-25,工程,R9,备份可恢复演练,工程,todo,E-24,随 E-24,—
 56,M9-06,需求,R9,数据自动备份,P0,todo,E-24,数据自动备份,P0，无 restic 配置
