@@ -32,6 +32,7 @@ from . import auth, health, pages
 from . import items as items_api
 from . import media as media_api
 from . import search as search_api
+from . import trash as trash_api
 
 PUBLIC_PATHS = frozenset(
     {"/login", "/api/auth/login", "/api/auth/bootstrap", "/api/health", "/favicon.ico"}
@@ -223,6 +224,36 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
             "/api/items/{item_id:int}",
             items_api.edit(pool),
             methods=["PATCH"],
+        ),
+        # ── 回收站（M4-03）─────────────────────────────────
+        #
+        # 五条路由、四条不同路径。**同一路径的 GET 与 DELETE 各写一条**
+        # 而不是 `methods=["GET","DELETE"]`：与上面 PATCH 那条同一个理由——
+        # `list_trash` 与 `purge_all` 是两个完全不同的动作，塞进一个 handler
+        # 会让「一次误发的 DELETE 走了读分支」这种事故无法从代码结构上看出来。
+        #
+        # `/api/items/{item_id:int}` 与既有 detail / edit 三条 Route 并存：
+        # Starlette 的 `:int` 只匹配 `[0-9]+`，`/api/items/12/restore` 不会被
+        # 它吃掉；三条同路径不同方法由 Starlette 合成 405。
+        #
+        # **五条都不进 `PUBLIC_PATHS`**：回收站里躺着已删内容的标题，
+        # 未登录不该看到（设计 §3.6）。
+        Route("/api/trash", trash_api.list_trash(pool), methods=["GET"]),
+        Route("/api/trash", trash_api.purge_all(pool), methods=["DELETE"]),
+        Route(
+            "/api/items/{item_id:int}",
+            trash_api.soft_delete(pool),
+            methods=["DELETE"],
+        ),
+        Route(
+            "/api/items/{item_id:int}/restore",
+            trash_api.restore(pool),
+            methods=["POST"],
+        ),
+        Route(
+            "/api/items/{item_id:int}/purge",
+            trash_api.purge_one(pool),
+            methods=["DELETE"],
         ),
         # 检索（E-18 / E-20 / M6-01…M6-03、M6-05）。
         # **刻意不加入 PUBLIC_PATHS**：搜索会返回库里的标题、摘要与标签，
