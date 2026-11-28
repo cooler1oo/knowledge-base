@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import pytest
 
-from kb.search.config import INDEX_BATCH, INDEX_UID, index_settings
+from kb.search.config import (
+    INDEX_BATCH,
+    INDEX_UID,
+    MAX_TOTAL_HITS,
+    index_settings,
+)
 from kb.search.indexer import Indexer, _batches, create_index
 from kb.search.models import IndexDoc, MeiliUnavailable
 
@@ -128,7 +133,7 @@ def test_ensure_index按设计一次PATCH():
         "saved_at_ts",
     ]
     assert settings["sortableAttributes"] == ["saved_at_ts"]
-    assert settings["pagination"] == {"maxTotalHits": 1000}
+    assert settings["pagination"] == {"maxTotalHits": MAX_TOTAL_HITS}
 
 
 def test_设置里不含content_text与ocr_text的展示():

@@ -25,7 +25,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from kb.api import search as search_api
-from kb.search.models import MeiliUnavailable, SearchMode
+from kb.search.models import MeiliUnauthorized, MeiliUnavailable, SearchMode
 from kb.store import items as items_store
 
 #: 11-22 北京时间 **04:30** 的那条（= UTC 11-21 20:30）。
@@ -786,3 +786,94 @@ def test_未登录时也返回401即使Meili配置正确() -> None:
     """鉴权在检索之前：配置对了也不能让未登录请求拿到内容。"""
     response = _client(logged_in=False).get("/api/search?q=营销")
     assert response.status_code == 401
+
+
+# ── 熔断的**跨请求**生效（QA 指出的缝）──────────────────────
+
+
+def test_熔断跨请求生效_两次请求只打一次Meili() -> None:
+    """熔断状态必须跨 HTTP 请求存活。
+
+    ## 这条用例为一次真实缺陷而写
+
+    第一版的 `kb/api/search.py` 在每个请求里 `new SearchService(...)`，
+    而熔断状态 `_down_until` 是 `SearchService` 的**实例属性**——请求结束即
+    丢弃。于是设计 §0 第 6 条承诺的「Meili 挂掉后 30 秒内不再白等 3 秒超时」
+    在生产路径上**完全不成立**：用户每点一次搜索都白等满 `SEARCH_TIMEOUT_SEC`。
+
+    ## 为什么原有用例没抓到
+
+    `tests/test_search_query.py` 的熔断用例是**同一个 `SearchService` 实例
+    连续调用两次**——那验的是「熔断逻辑本身对不对」（是对的），而不是
+    「它在生产装配下有没有机会生效」。这是 QA 说的典型缝隙：
+    **逻辑正确 ≠ 装配后生效**。
+
+    所以这条用例必须走**真实 handler**、发**两次独立 HTTP 请求**：
+    `_client()` 返回的 `TestClient` 背后是一个 app，两次 `.get()` 就是两次
+    请求，中间没有任何共享对象——除非 handler 上层真的持有熔断状态。
+    """
+    # 剧本只放 1 个异常：若熔断生效，第二次请求根本不会碰 client；
+    # 若熔断失效，第二次会再取剧本 → FakeClient 抛 AssertionError（剧本用光），
+    # 而那个异常会被 handler 收成 500，用例同样会红——两种失败形态都能抓。
+    meili = FakeClient([MeiliUnavailable("挂了")])
+    client = _client(meili=meili)
+
+    first = client.get("/api/search?q=营销")
+    second = client.get("/api/search?q=营销")
+
+    # 先断言调用次数：它直接指向缺陷本身，失败信息也最直白。
+    # 若熔断失效，第二次会真的再打一次 Meili（剧本用光后 FakeClient 默认
+    # 返回空命中），于是这里看到 2。
+    assert len(meili.calls) == 1, (
+        f"第二次请求应被熔断挡住，实际打了 {len(meili.calls)} 次 Meili"
+    )
+    assert first.status_code == 200
+    assert first.json()["searchMode"] == "fallback", "第一次应降级"
+    assert second.status_code == 200, "第二次不该 500"
+    assert second.json()["searchMode"] == "fallback"
+
+
+def test_熔断跨请求时401也算挂() -> None:
+    """401 在搜索路径上判「不可用」并熔断（设计 §6.1）。
+
+    这条与上一条分开写，因为它守的是**另一个**决定：401 也要跳闸。
+    合并成一条时，若实现只对 `MeiliUnavailable` 熔断、对 401 不熔断，
+    上一条仍然绿——而用户看到的是「key 配错时每次搜索都白等 3 秒」。
+    """
+    meili = FakeClient([MeiliUnauthorized("401")])
+    client = _client(meili=meili)
+
+    assert client.get("/api/search?q=x").json()["searchMode"] == "fallback"
+    assert client.get("/api/search?q=x").json()["searchMode"] == "fallback"
+    assert len(meili.calls) == 1, "401 也该跳闸，第二次不该再打 Meili"
+
+
+def test_放宽重查时401也走兜底不穿透成500() -> None:
+    """⚠️ **QA 指出的第二个缺陷**：同一函数两条路径对同一类异常处置不同。
+
+    `_try_meili` 有两条调 client 的路径：
+
+    1. 首次查询——catch 了 `MeiliUnauthorized` 与 `MeiliUnavailable`
+    2. **0 命中后的放宽重查**——第一版只 catch 了 `MeiliUnavailable`
+
+    于是 401 在路径 2 上穿透到 API 层 → 500。而这条路径的触发条件很窄
+    （必须有查询词、设了阈值、首次恰好 0 命中），所以现象是
+    「平时搜索正常降级，偶尔某个词就 500」——最难查的那种。
+
+    用户视角：同一个搜索框，搜 A 词降级能用，搜 B 词报错。
+    """
+    meili = FakeClient(
+        [
+            # 第一次查询成功但 0 命中（触发放宽重查）
+            {"hits": [], "estimatedTotalHits": 0},
+            # 重查抛 401
+            MeiliUnauthorized("401"),
+        ]
+    )
+    client = _client(meili=meili)
+
+    response = client.get("/api/search?q=挂耳咖啡")
+    assert response.status_code == 200, (
+        f"重查时的 401 穿透成了 {response.status_code}，应降级成 fallback"
+    )
+    assert response.json()["searchMode"] == "fallback"

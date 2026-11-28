@@ -173,10 +173,42 @@ def test_build_filter转义标签里的双引号() -> None:
     assert expression == 'tags = "he said \\"hi\\""'
 
 
-def test_反斜杠不转义() -> None:
-    """Meili 的 filter 语法只定义了双引号的转义，反斜杠按字面处理。
-    转了会变成两个字符，库里真的有反斜杠的标签（`C:\\`）会匹配不到。"""
-    assert quote("C:\\") == '"C:\\"'
+def test_反斜杠必须转义成两个() -> None:
+    """⚠️ **这条用例的断言被我写反过，是 QA 抓出来的。**
+
+    第一版这里断言「反斜杠不转义」，理由写在 docstring 里：「Meili 只定义了
+    双引号的转义，反斜杠按字面处理」。**那句话是错的。**
+
+    真机复验（平板 Meili 1.58.0，每种跑 5 次）：
+
+    | filter 值 | 结果 |
+    |---|---|
+    | `tags = "C:\\Users"`（1 个反斜杠） | **400 `Malformed value`**，5/5 稳定 |
+    | `tags = "C:\\\\Users"`（2 个反斜杠） | 200，命中该标签 |
+
+    用户影响：库里有含反斜杠的标签（粘贴进来的 Windows 路径）时，按它筛选
+    会产生 400，而 400 在搜索路径上**不降级**（设计 §6.1）→ 整个搜索页 500，
+    不是「筛不出来」。
+
+    我最初为什么会写反：早期实验里我以为在测反斜杠，实际构造的是正斜杠
+    （`"C:/Users"`），repr 显示成 `'C://Users'` 让我误以为已经发生了转义。
+    改用 `chr(92)` 逐字节对照后才看清。
+    """
+    assert quote("C:\\Users") == '"C:\\\\Users"'
+    # 单个反斜杠也要转
+    assert quote("C:\\") == '"C:\\\\"'
+
+
+def test_反斜杠与双引号相邻时两个都要转且顺序正确() -> None:
+    """`\\` 与 `"` 同时出现时，**必须先把反斜杠转成两个，再转双引号**。
+
+    顺序反了会出错：若先做 `"` → `\\"`，那个新产生的反斜杠会被第二步
+    再转一遍变成 `\\\\"`，引号又暴露出来了。
+
+    这类输入真的会出现：标签名里粘贴一段带引号的 Windows 路径。
+    """
+    # 输入：C:\"x  （反斜杠 + 双引号相邻）
+    assert quote('C:\\"x') == '"C:\\\\\\"x"'
 
 
 # ── build_filter ───────────────────────────────────────────────
@@ -795,3 +827,22 @@ def test_分页常量符合契约() -> None:
     """`/api/search` 的约束（设计 §3.7）：limit 1–50、offset 0–999。
     常量落在这里而不是 api 层，是为了让「夹边界」与「校验」用同一组数。"""
     assert (DEFAULT_LIMIT, MAX_LIMIT, MAX_OFFSET) == (20, 50, 999)
+
+
+def test_offset上限加limit上限不超过maxTotalHits() -> None:
+    """三个分页常量是**一组**，必须互相校验（QA 抓到的问题）。
+
+    `offset=999&limit=50` 要求 Meili 返回第 1000–1049 条。第一版
+    `MAX_TOTAL_HITS = 1000`，越界部分被 Meili **静默截掉**——用户看到
+    「翻到 1000 条之后就没有了」，且没有任何提示说是被上限切断的。
+
+    这不是「当前会不会触发」的问题（个人库远低于这个量级），而是
+    **两个常量各自定义、没有互相校验**。改任何一个而不同步其余就会红。
+    """
+    from kb.search.config import MAX_TOTAL_HITS
+
+    assert MAX_OFFSET + MAX_LIMIT <= MAX_TOTAL_HITS, (
+        f"offset 上限 {MAX_OFFSET} + limit 上限 {MAX_LIMIT} = "
+        f"{MAX_OFFSET + MAX_LIMIT} 超过 maxTotalHits={MAX_TOTAL_HITS}，"
+        f"最后 {MAX_OFFSET + MAX_LIMIT - MAX_TOTAL_HITS} 条请求会静默返回空"
+    )
