@@ -46,6 +46,7 @@ from kb.ai.outcomes import (
     SummarizeSkipped,
 )
 from kb.ai.validate import validate_tags
+from kb.extract.normalize import domain_of
 from kb.media import persist, plan
 from kb.search.config import (
     DEFER_MEILI_DOWN_SEC,
@@ -55,6 +56,7 @@ from kb.search.config import (
 )
 from kb.search.models import MeiliRejected, MeiliUnauthorized, MeiliUnavailable
 from kb.store import attachments as attachments_store
+from kb.store import domain_rules
 from kb.store import items as items_store
 from kb.store import jobs as jobs_store
 from kb.store import search as search_store
@@ -193,6 +195,34 @@ def run_fetch(
         return
 
     kwargs = _outcome_to_kwargs(url, outcome)
+
+    # ── M3-08：域名规则覆盖自动判定 ──────────────────────────
+    #
+    # **套用点在这里而不是 `/api/items` 的 create 分支**：入库时 URL 条目的
+    # kind 固定是 `"link"`（`_parse_create` 只看「有没有链接」），真实类型
+    # 要等这一步抓完、由 `decide_kind` 按媒体与字数算出来。在 create 时查规则
+    # 只能把 `link` 换成规则值——那会跳过类型判定的全部逻辑，把一条视频
+    # 直接标成 article 而不管它到底有没有视频。
+    #
+    # 所以：先让 `decide_kind` 算出**建议**，再看用户有没有**修正过**。
+    # 规则优先于自动判定（技术方案 T1「含 domain_type_rules 优先」）——
+    # 否则「被记住」这件事没有意义：用户改了一次，系统下次还按自己的规则判。
+    #
+    # 只在 `ok=True` 时套用：抓取失败时 `kwargs` 里根本没有 kind，
+    # `apply_extract` 也刻意不动 kind（见它的 docstring）。
+    if outcome.ok:
+        domain = domain_of(url)
+        ruled = domain_rules.get_kind_for(conn, domain or "")
+        if ruled is not None:
+            log.info(
+                "域名规则生效 item=%s domain=%s kind %s -> %s",
+                item_id,
+                domain,
+                kwargs.get("kind"),
+                ruled,
+            )
+            kwargs["kind"] = ruled
+
     items_store.apply_extract(conn, item_id, **kwargs)
 
     if not outcome.ok:
