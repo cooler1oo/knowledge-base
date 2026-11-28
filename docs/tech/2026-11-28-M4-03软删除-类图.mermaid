@@ -1,0 +1,184 @@
+classDiagram
+    direction LR
+
+    %% store 层：唯一写库处（kb/store/items.py）
+    class ItemsStore {
+        <<module>>
+        +TRASH_RETENTION_DAYS int
+        +soft_delete(conn, item_id) DeleteResult
+        +restore_item(conn, item_id) RestoreResult
+        +list_trash(conn, limit, before_deleted_at, before_id) list
+        +count_trash(conn) int
+        +purge_item(conn, item_id) bool
+        +purge_all(conn) list
+        +purge_expired(conn, older_than_days, limit) list
+    }
+
+    %% 既有函数，本轮一行未改
+    class ItemsStoreExisting {
+        <<module 既有>>
+        +list_items(conn, limit, before_id) list
+        +get_item(conn, item_id) ItemDetail
+        +summaries_by_ids(conn, ids) list
+        +create_item(conn, kind, url, url_norm, title, source_domain, content_text, step) CreateResult
+        +set_kind(conn, item_id, kind) bool
+    }
+
+    class DeleteStatus {
+        <<enumeration>>
+        DELETED
+        ALREADY_DELETED
+        NOT_FOUND
+    }
+
+    class RestoreStatus {
+        <<enumeration>>
+        RESTORED
+        ALREADY_ACTIVE
+        CONFLICT
+        NOT_FOUND
+    }
+
+    class DeleteResult {
+        <<frozen>>
+        +status DeleteStatus
+        +item_id int
+        +deleted_at datetime
+        +purge_at datetime
+    }
+
+    class RestoreResult {
+        <<frozen>>
+        +status RestoreStatus
+        +item_id int
+        +conflict_item_id int
+    }
+
+    class TrashEntry {
+        <<frozen>>
+        +id int
+        +kind str
+        +url str
+        +title str
+        +source_domain str
+        +saved_at datetime
+        +deleted_at datetime
+        +purge_at datetime
+        +days_left int
+        +read_status str
+        +summary str
+        +conflicts_with_active bool
+    }
+
+    ItemsStore ..> DeleteResult : 产出
+    ItemsStore ..> RestoreResult : 产出
+    ItemsStore ..> TrashEntry : 产出
+    DeleteResult --> DeleteStatus
+    RestoreResult --> RestoreStatus
+
+    %% API 层：解析与序列化（kb/api/trash.py）
+    class TrashApi {
+        <<module>>
+        +soft_delete(pool) Handler
+        +restore(pool) Handler
+        +list_trash(pool) Handler
+        +purge_one(pool) Handler
+        +purge_all(pool) Handler
+        -_error(message, status, extra) JSONResponse
+        -_json_trash(entry) dict
+    }
+
+    TrashApi ..> ItemsStore : 调用（唯一写库通道）
+    TrashApi ..> TrashEntry : 序列化
+
+    %% worker 层：索引联动与每日清扫
+    class RunIndex {
+        <<function>>
+        +run_index(conn, item_id, job_id, indexer, upstream) None
+    }
+
+    class Purge {
+        <<module>>
+        +PURGE_INTERVAL_SEC float
+        +PURGE_BATCH int
+        +purge_once(pool, indexer, older_than_days, limit) dict
+        -_purge_loop(pool, indexer, stop) None
+    }
+
+    class Indexer {
+        <<existing>>
+        +upsert(docs) int
+        +delete_ids(ids) int
+    }
+
+    class JobsStore {
+        <<existing>>
+        +enqueue(conn, item_id, step) bool
+        +mark_done(conn, job_id) None
+        +defer(conn, job_id, seconds, reason) None
+    }
+
+    class IndexSource {
+        <<existing>>
+        +index_source_row(conn, item_id) IndexDoc
+    }
+
+    Purge ..> ItemsStore : purge_expired()
+    Purge ..> Indexer : delete_ids(删掉的 id)
+    RunIndex ..> IndexSource : index_source_row()
+    RunIndex ..> Indexer : upsert 或 delete_ids
+    RunIndex ..> JobsStore : mark_done / defer
+    ItemsStore ..> JobsStore : enqueue(_, index)
+    ItemsStoreExisting ..> JobsStore : enqueue
+
+    %% 存储：items 表与三张级联子表
+    class Items {
+        <<table>>
+        +id bigserial PK
+        +kind text FK
+        +url text
+        +url_norm text
+        +title text
+        +summary text
+        +content_text text
+        +ocr_text text
+        +status text
+        +saved_at timestamptz
+        +deleted_at timestamptz
+        +props jsonb
+    }
+
+    class ItemsUrlNormUniq {
+        <<partial unique index>>
+        +url_norm text
+        +predicate deleted_at is null
+    }
+
+    class Attachments {
+        <<table>>
+        +id bigserial PK
+        +item_id bigint FK
+        +storage_key text
+        +size_bytes bigint
+    }
+
+    class ItemTags {
+        <<table>>
+        +item_id bigint FK
+        +tag_id bigint FK
+    }
+
+    class Jobs {
+        <<table>>
+        +id bigserial PK
+        +item_id bigint FK
+        +step text
+        +state text
+        +attempts smallint
+    }
+
+    ItemsStore ..> Items : 唯一写入口
+    Items --> ItemsUrlNormUniq : 软删释放 URL 占用
+    Items "1" --> "0..*" Attachments : on delete cascade
+    Items "1" --> "0..*" ItemTags : on delete cascade
+    Items "1" --> "0..*" Jobs : on delete cascade

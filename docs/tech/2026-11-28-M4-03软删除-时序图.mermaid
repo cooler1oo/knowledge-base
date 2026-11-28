@@ -1,0 +1,116 @@
+%% 图一：软删 → 索引清理（含重复删幂等与冲突重存）
+%% 图二：恢复（含 409 冲突分支）
+%% 图三：每日清扫（30 天到期物理删）
+
+sequenceDiagram
+    autonumber
+    participant U as 用户/前端
+    participant MW as SessionMiddleware
+    participant API as kb/api/trash.py
+    participant ST as items_store
+    participant DB as Postgres
+    participant WK as kb/worker/loop.py
+    participant IDX as Indexer
+    participant ME as Meilisearch
+
+    rect rgb(240, 248, 255)
+    Note over U,ME: 图一 · 软删（DELETE /api/items/12）
+    U->>MW: DELETE /api/items/12
+    MW->>MW: 校验 Cookie 会话（不在 PUBLIC_PATHS）
+    alt 未登录
+        MW-->>U: 401 {"error":"未登录"}
+    else 已登录
+        MW->>API: dispatch
+        API->>ST: soft_delete(conn, 12)
+        ST->>DB: with upd as (update items set deleted_at = now()<br/>where id=12 and deleted_at is null returning id, deleted_at),<br/>queued as (insert into jobs (item_id, step) select id,'index' from upd<br/>on conflict (item_id,step) where state in ('pending','running') do nothing)
+        alt 命中 1 行（首次删）
+            DB-->>ST: (12, 2026-11-28T15:20:31+08:00)
+            ST-->>API: DeleteResult(DELETED, 12, ts, ts+30d)
+            API-->>U: 200 {"id":12,"deletedAt":"…","purgeAt":"…"}
+        else 命中 0 行且行存在（重复删）
+            ST->>DB: select deleted_at from items where id=12
+            DB-->>ST: 2026-11-01T09:00:00+08:00（原始时刻）
+            ST-->>API: DeleteResult(ALREADY_DELETED, 12, 原 ts, 原 ts+30d)
+            API-->>U: 200 {"id":12,"alreadyDeleted":true,"deletedAt":"原始…"}
+            Note right of API: 不续期：deleted_at 保持第一次的值
+        else 行不存在
+            ST-->>API: DeleteResult(NOT_FOUND, 12, null, null)
+            API-->>U: 404 {"error":"没有这条"}
+        end
+
+        Note over WK,ME: 后台对账（0–2 秒后，worker 领到 index job）
+        WK->>DB: jobs.claim_one() → (job=88, item=12, step='index')
+        WK->>DB: jobs.blocking_upstream(item=12, job=88, steps=(fetch,summarize,tag), soon=90)
+        alt 上游 running 或 90 秒内到期
+            WK->>DB: jobs.defer(88, 30s, "已推迟：等待 summarize 完成")
+            Note right of WK: attempts 不变
+        else 上游都完成
+            WK->>ST: search.index_source_row(conn, 12)
+            ST->>DB: select … from items where id=12 and deleted_at is null
+            DB-->>ST: 0 行
+            ST-->>WK: None
+            WK->>IDX: delete_ids([12])
+            IDX->>ME: DELETE /indexes/kb_items/documents/delete-batch [12]
+            ME-->>IDX: 202 {taskUid: 771}
+            Note right of IDX: 不等任务（与 upsert 同口径）
+            WK->>DB: jobs.mark_done(88)
+        end
+    end
+    end
+
+    rect rgb(245, 255, 245)
+    Note over U,ME: 图二 · 恢复（POST /api/items/12/restore）
+    U->>API: POST /api/items/12/restore
+    API->>ST: restore_item(conn, 12)
+    ST->>DB: select deleted_at from items where id=12
+    alt 无行
+        ST-->>API: RestoreResult(NOT_FOUND, 12, null)
+        API-->>U: 404 {"error":"没有这条"}
+    else deleted_at 为空（本来就没删）
+        ST-->>API: RestoreResult(ALREADY_ACTIVE, 12, null)
+        API-->>U: 200 {"id":12,"deletedAt":null,"alreadyActive":true}
+        Note right of API: 不改任何行（连 items_touch 都不触发）
+    else deleted_at 非空
+        ST->>DB: select id from items<br/>where url_norm=(select url_norm from items where id=12)<br/>and url_norm is not null and deleted_at is null and id<>12
+        alt 查到活条目 31
+            ST-->>API: RestoreResult(CONFLICT, 12, 31)
+            API-->>U: 409 {"error":"库里已有一条同链接的内容（id=31），先删掉它再恢复这条","conflictItemId":31}
+        else 无冲突
+            ST->>DB: with upd as (update items t set deleted_at = null<br/>where t.id=12 and t.deleted_at is not null<br/>and not exists (活条目同 url_norm)),<br/>queued as (insert into jobs (item_id,step) select id,'index' from upd …)
+            alt 命中 1 行
+                DB-->>ST: (12)
+                ST-->>API: RestoreResult(RESTORED, 12, null)
+                API-->>U: 200 {"id":12,"deletedAt":null,"restored":true}
+                Note over WK,ME: worker 之后领到 index job → upsert 写回索引
+                WK->>ST: search.index_source_row(conn, 12)
+                ST-->>WK: IndexDoc（这次非 None）
+                WK->>IDX: upsert([doc])
+                IDX->>ME: POST /indexes/kb_items/documents
+                WK->>DB: jobs.mark_done
+            else 命中 0 行（并发窗口里被抢存了同 URL）
+                ST->>DB: 23505 → DatabaseError.args[0]["C"]=="23505"
+                ST-->>API: RestoreResult(CONFLICT, 12, null)
+                API-->>U: 409 {"error":"库里已有一条同链接的内容，先删掉它再恢复这条","conflictItemId":null}
+            end
+        end
+    end
+    end
+
+    rect rgb(255, 250, 240)
+    Note over WK,ME: 图三 · 每日清扫（kb/worker/purge.py，启动先跑一次后每 3600 秒）
+    loop ids = purge_expired(older_than_days=30, limit=200)；ids 为空则退出
+        WK->>ST: items.purge_expired(conn, 30, 200)
+        ST->>DB: with doomed as (select id from items<br/>where deleted_at is not null<br/>and deleted_at < now() - make_interval(days => cast(:days as int))<br/>and not exists (jobs state='running')<br/>order by deleted_at limit 200)<br/>delete from items where id in (select id from doomed) returning id
+        Note right of DB: attachments / item_tags / jobs<br/>由 on delete cascade 一起删（不手写删子行）
+        DB-->>ST: [7, 9]
+        ST-->>WK: [7, 9]
+        WK->>IDX: delete_ids([7, 9])
+        alt Meili 正常
+            IDX->>ME: DELETE …/delete-batch [7,9]
+        else MeiliUnavailable
+            IDX-->>WK: MeiliUnavailable
+            Note right of WK: 记 warning，继续下一批；<br/>残留由 rebuild 差集兜
+        end
+        Note right of WK: len(ids) < 200 → 退出循环
+    end
+    end
