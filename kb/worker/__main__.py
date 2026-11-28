@@ -90,6 +90,23 @@ def build_media_stage() -> Any:
     return persist.production_stage(media_root_from_env())
 
 
+def build_indexer() -> Any:
+    """构造索引写入器（R6）。**构造不联网**，第一次 `upsert` 才发请求。
+
+    为什么不让启动阶段探一次 Meili：Meili 与 worker 都在同一个 proot 容器里，
+    但 supervisor 的启动顺序不保证——worker 先起来时探活必然失败，
+    而那是**正常的启动顺序**，不是故障。让它失败会把「服务还没起」变成
+    「worker 启动失败」，进而被 supervisor 反复重启，Meili 反而更晚起来。
+
+    失败留给 `run_index` 按三类分级处理：挂 → defer 60 秒、
+    401 → defer 600 秒 + 提示检查 `KB_MEILI_KEY`、4xx → mark_failed。
+    """
+    from kb.search.client import client_from_env
+    from kb.search.indexer import Indexer
+
+    return Indexer(client_from_env())
+
+
 # 心跳间隔。必须小于 api 侧 WORKER_STALE_AFTER（90 秒），
 # 否则 worker 明明在跑也会被报成 false。留 3 倍余量给偶发的慢抓取。
 HEARTBEAT_SECONDS = 30.0
@@ -173,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     ensure_ai_available()
     ai_client = build_ai_client()
     media_stage = build_media_stage()
+    indexer = build_indexer()
 
     pool = Pool(PgConfig.from_env())
     stop = threading.Event()
@@ -208,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("worker 启动，idle=%.1fs 心跳=%.0fs", args.idle, HEARTBEAT_SECONDS)
     log.info("媒体目录：%s", media_stage.media_root)
+    log.info("检索索引：%s（服务地址 %s）", indexer.index_uid, indexer.client.base_url)
     try:
         run_forever(
             pool,
@@ -215,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
             idle_seconds=args.idle,
             ai_client=ai_client,
             media_stage=media_stage,
+            indexer=indexer,
         )
     except KeyboardInterrupt:
         pass
