@@ -39,6 +39,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .config import CIRCUIT_TTL_SEC, MIN_SCORE
@@ -63,6 +64,53 @@ NOTICE_FALLBACK = "搜索服务未运行，结果按字面匹配，可能漏掉�
 NOTICE_UNAVAILABLE = "搜索暂不可用：检索服务与数据库都不可达，请稍后重试"
 NOTICE_SINGLE_CHAR = "单字查询结果比较杂，多打一个字会准很多"
 NOTICE_RELAXED = "结果比较宽泛（已放宽相关度门槛），换成更具体的词会更准"
+NOTICE_TRUNCATED = "查询过长，只用了前 64 个字符搜索"
+
+
+@dataclass
+class CircuitState:
+    """熔断状态。**生命周期独立于 `SearchService` 实例。**
+
+    ## 为什么必须是独立对象
+
+    熔断是**服务级**状态，不是请求级。第一版把它放在 `SearchService` 的
+    实例属性上（`self._down_until`），而 `kb/api/search.py` 每个 HTTP 请求都
+    `new SearchService(...)`——状态在请求结束时丢弃。后果是设计 §0 第 6 条
+    承诺的「Meili 挂掉后 30 秒内不再白等 3 秒超时」在生产路径上**完全失效**：
+    用户每点一次搜索都白等满 `SEARCH_TIMEOUT_SEC`。
+
+    用真实 handler 三次请求验过：client 被调 3 次（应停在 1 次）。
+
+    ## 两种持有方式，各有用途
+
+    | 场景 | 谁持有 | 效果 |
+    |---|---|---|
+    | 单测 | `SearchService` 自带一份（`circuit=None`） | 同一实例连续调用仍共享状态，既有用例不用改 |
+    | 生产 | `kb/api/search.py` 的 handler 工厂持有，**每次请求传同一份** | 跨请求存活，熔断真的生效 |
+
+    `down_until` 用 `0.0` 表示「从未挂过」而不是 `None`：与 `clock()` 的
+    单调时基比较时不用判空，`clock() < 0.0` 恒假。
+
+    ## 为什么不是线程安全的
+
+    单用户、单进程（`kb/api/__main__.py` 不开多 worker），并发请求最多是
+    浏览器的几个预连接。读写两个 `float` 在 CPython 下不会撕裂，而
+    「两个请求同时判定要跳闸」的最坏后果是多写一次 `down_until`——
+    结果仍正确。加锁的代价大于收益。
+    """
+
+    down_until: float = 0.0
+    trips: int = 0
+
+    def trip(self, now: float, ttl_sec: float) -> None:
+        """记一次熔断：推到 `now + ttl_sec`，计数 +1。
+
+        收成一个方法而不是两处各写两行：三处调用点（首次 401、首次不可用、
+        重查不可用）必须行为一致，而「忘了 `trips += 1`」这种漏不会有任何报错，
+        只表现为计数偏低。
+        """
+        self.down_until = now + ttl_sec
+        self.trips += 1
 
 
 class SearchClientPort(Protocol):
@@ -93,6 +141,7 @@ class SearchService:
         min_score: float = MIN_SCORE,
         circuit_ttl_sec: float = CIRCUIT_TTL_SEC,
         index_uid: str | None = None,
+        circuit: CircuitState | None = None,
     ) -> None:
         self.client = client
         self.fallback = fallback
@@ -107,11 +156,27 @@ class SearchService:
 
             index_uid = INDEX_UID
         self.index_uid = index_uid
-        #: 熔断截止时刻（`clock()` 的时基）。`0.0` = 从未挂过。
-        self._down_until = 0.0
-        #: 熔断触发次数。测试断言「第二次调用不再碰 client」时用它，
-        #: 生产日志里也能看出「今天挂过几次」。
-        self.circuit_trips = 0
+        #: 熔断状态。**默认自带一份**（`None` 时新建），所以单测里连续两次
+        #: `run()` 仍然共享状态，54 条既有用例一条都不用改。
+        #:
+        #: 生产路径必须**注入共享的那一份**：`kb/api/search.py` 每个请求都
+        #: `new SearchService`，状态留在实例里的话请求结束即丢弃，熔断永不生效
+        #: （见 `CircuitState` 的 docstring）。
+        self._circuit = circuit if circuit is not None else CircuitState()
+
+    # ── 熔断状态的两个只读视图 ────────────────────────────────
+    #
+    # 保留这两个名字是为了让既有用例与日志读法不变。
+    # `circuit_trips` 从实例属性变成 property，**赋值会失败**——那是好事：
+    # 状态只该由熔断逻辑自己改，外部写它一定是 bug。
+
+    @property
+    def _down_until(self) -> float:
+        return self._circuit.down_until
+
+    @property
+    def circuit_trips(self) -> int:
+        return self._circuit.trips
 
     # ── 对外 ─────────────────────────────────────────────────
 
@@ -150,15 +215,13 @@ class SearchService:
             # 索引路径上 401 落 `MeiliUnauthorized`（要写「检查 KB_MEILI_KEY」），
             # 因为那条路径上用户能改配置。
             log.warning("检索服务拒绝访问，按不可用处理并熔断：%s", exc)
-            self._down_until = self.clock() + self.circuit_ttl_sec
-            self.circuit_trips += 1
+            self._circuit.trip(self.clock(), self.circuit_ttl_sec)
             return None
         except MeiliUnavailable as exc:
             # 只有这两类进熔断。`MeiliRejected`（filter 语法错）不该跳闸
             # ——它是我们的 bug，不会「30 秒后自己好」。
             log.warning("检索服务不可用，熔断 %.0f 秒：%s", self.circuit_ttl_sec, exc)
-            self._down_until = self.clock() + self.circuit_ttl_sec
-            self.circuit_trips += 1
+            self._circuit.trip(self.clock(), self.circuit_ttl_sec)
             return None
 
         hits = _hits_from_meili(body)
@@ -167,7 +230,50 @@ class SearchService:
         if hits or threshold <= 0 or not query.text:
             return self._result(query, hits, relaxed=False, total=total)
 
-        # 0 命中且设了分数下限：用 min_score=0 重查一次。
+        # ⚠️ **`0 命中` 分不清两件事，必须先排掉第二种**（QA 抓到）：
+        #
+        # 1. 相关度门槛把结果全截了 → 该放宽（设计 §5.3 的意图）
+        # 2. **用户翻过了最后一页** → 绝对不该放宽
+        #
+        # 第 2 种情况下 `hits` 为空是因为 `offset` 越过了尾部，不是因为分数低。
+        # 不放这个判据的话，用户在末页点「下一页」会突然看到一堆低分噪音
+        # （正是 `MIN_SCORE` 要截掉的 0.285 那种），且：
+        #   - `relaxed=true` 让人以为「结果是放宽出来的」
+        #   - `estimated_total` 从 30 跳成 200，分页器算出「还有 170 条」，
+        #     用户继续翻，每页都是噪音
+        #   - 每次白打一次 Meili（首次 + 重查 = 双倍 QPS）
+        #
+        # 判据：**这一页空了、且后面也没有剩余** → 这是翻页，不是分数截的。
+        #
+        # 三组边界值必须同时满足，这是我改了两版才对的地方：
+        #
+        # | total | offset | 判定 | 理由 |
+        # |---|---|---|---|
+        # | 0 | 0 | **放宽** | 库里真没有 → 放宽确认一次是合理的 |
+        # | 30 | 0 | **不放宽** | 有 30 条却 0 命中 → 确实是门槛截的，这才该放宽 |
+        # | 30 | 30 | **不放宽** | 正好翻到尾部之后 → 空页是正常的 |
+        # | 30 | 40 | **不放宽** | 翻过头了 → 空页是正常的 |
+        #
+        # 所以「翻页」= `total > 0 且 total <= offset`；
+        # `total == 0` 是「库里没有」，`total > offset` 是「还有数据但 0 命中」
+        # （后者才是 `MIN_SCORE` 要放宽的场景）。
+        #
+        # 我第一版写 `total >= offset`：把 `total=30, offset=0`（**最该放宽的那种**）
+        # 也判成翻页，四条原有用例同时变红；第二版写 `total > offset`：把
+        # `total=30, offset=30` 判成该放宽，QA 这条红。
+        #
+        # `estimated_total` 为 `None`（响应缺字段）时保守地**不放宽**——
+        # 宁可少一次放宽，也不要给用户一屏噪音。
+        paging = total is not None and 0 < total <= query.offset
+        if total is None or paging:
+            log.info(
+                "0 命中但 estimated_total=%s、offset=%s，判定为翻页而非全被截，不放宽",
+                total,
+                query.offset,
+            )
+            return self._result(query, hits, relaxed=False, total=total)
+
+        # 0 命中且**确实**可能是分数门槛截的：用 min_score=0 重查一次。
         # 只放宽分数，**不放宽 `matchingStrategy`**：后者会让「抖音 剪辑 卡点」
         # 这种多一个词的查询退化成只按一个词匹配，垃圾召回会大量增加。
         log.info("0 命中，放宽分数下限重查一次：%r", query.text)
@@ -175,13 +281,28 @@ class SearchService:
         relaxed_payload.pop("rankingScoreThreshold", None)
         try:
             relaxed_body = self.client.search(self.index_uid, relaxed_payload)
+        except MeiliUnauthorized as exc:
+            # ⚠️ **这条分支曾经漏掉，被 QA 抓到。**
+            #
+            # 首次查询 catch 了 `MeiliUnauthorized` 与 `MeiliUnavailable`，
+            # 而重查只 catch 了 `MeiliUnavailable`——同一函数两条路径对同一类
+            # 异常处置不同。401 在重查路径上穿透到 API 层 → 500。
+            #
+            # 触发条件很窄（有查询词 + 设了阈值 + 首次恰好 0 命中），所以现像是
+            # 「平时搜索正常降级，偶尔某个词就 500」。用户视角：同一个搜索框，
+            # 搜 A 词降级能用，搜 B 词报错。
+            #
+            # 处置与首次查询一致：熔断 + 走兜底。用户拿到的是一份能用但降级的
+            # 结果，而不是一个 500 页面。
+            log.warning("放宽重查时检索服务拒绝访问，按不可用处理：%s", exc)
+            self._circuit.trip(self.clock(), self.circuit_ttl_sec)
+            return None
         except MeiliUnavailable as exc:
             # 重查也挂 → 熔断 + 兜底。这里**不抛**：第一次查询是成功的，
             # 说明服务活着；重查挂说明它刚好在这一刻死了，与「一开始就挂」
             # 的处理应该一样（都给用户一份能用的结果）。
             log.warning("放宽重查时检索服务不可用：%s", exc)
-            self._down_until = self.clock() + self.circuit_ttl_sec
-            self.circuit_trips += 1
+            self._circuit.trip(self.clock(), self.circuit_ttl_sec)
             return None
 
         relaxed_hits = _hits_from_meili(relaxed_body)
@@ -229,17 +350,23 @@ class SearchService:
     ) -> SearchResult:
         """把命中收成 `SearchResult`，补 `notice`。
 
-        ## 两条提示可以同时出现，用空格拼
+        ## 三条提示可以同时出现，用空格拼
 
-        「放宽过」与「单字查询」是两件独立的事实，都可能同时成立（单字查询
-        0 命中 → 放宽 → 有结果）。只给一条会让另一条消失，而用户看到的
-        「结果很少且很杂」需要两句一起解释。两者都是**提示**不是错误，
-        所以 `degraded` 保持 False。
+        「放宽过」「单字查询」「查询被截断」是三件独立的事实。只给一条会让
+        其余消失，而用户看到的「结果很少且很杂」需要几句一起解释。
+        三者都是**提示**不是错误，所以 `degraded` 保持 False。
 
-        顺序：先放宽（解释「为什么这些低分结果在里面」），再单字
-        （解释「为什么整体这么杂」）——从具体到笼统。
+        顺序：截断（最优先，它解释了「为什么搜的东西变少了」）→ 放宽
+        （解释「为什么这些低分结果在里面」）→ 单字（解释「为什么整体这么杂」）
+        ——从「用户输入被动过」到「结果质量」，先答最可能被误解的那条。
+
+        截断排第一的理由：它是唯一**改动了用户输入**的行为。用户以为搜的是
+        一整句，实际只搜了前 64 字——不先说这个，后面两句都容易被误读成
+        「系统把我搜的词搞乱了」。
         """
         notices: list[str] = []
+        if query.truncated:
+            notices.append(NOTICE_TRUNCATED)
         if relaxed:
             notices.append(NOTICE_RELAXED)
         if looks_like_single_char(query.text):

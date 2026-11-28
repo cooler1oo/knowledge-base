@@ -49,8 +49,8 @@ from kb.search.config import (
     display_tz,
 )
 from kb.search.models import SearchFilter, SearchHit, SearchMode, SearchQuery
-from kb.search.query import normalize_query
-from kb.search.service import SearchService
+from kb.search.query import normalize_query, was_truncated
+from kb.search.service import CircuitState, SearchService
 from kb.store import items as items_store
 from kb.store import search as search_store
 from kb.store.db import Pool
@@ -267,10 +267,19 @@ def search(
         # 兜底是**注入**的：`kb/store/search.py` 的 `fallback_for(conn)` 返回一个
         # 闭合在本次连接上的 `FallbackFn`。这样 `kb/search/` 不需要 import
         # `kb.store`（那条边界由 `layer_rules.toml` 守着）。
+        #
+        # ⚠️ **熔断状态必须由本函数（每个 app 只调一次）持有，不能留在
+        # `SearchService` 实例里。** `_service` 每个请求都调一次、每次 new 一个
+        # `SearchService`，状态留实例里就会请求结束即丢弃——熔断永不生效，
+        # Meili 挂掉时用户每点一次搜索都白等满 `SEARCH_TIMEOUT_SEC`。
+        # 2026-11-28 用真实 handler 三次请求验过：client 被调 3 次（应停在 1 次）。
+        if "circuit" not in holder:
+            holder["circuit"] = CircuitState()
         return SearchService(
             meili,
             search_store.fallback_for(conn),
             min_score=min_score,
+            circuit=holder["circuit"],
         )
 
     async def handler(request: Request) -> Response:
@@ -285,7 +294,11 @@ def search(
             except ValueError as exc:
                 return _error(str(exc))
 
-            text = normalize_query(request.query_params.get("q", ""))
+            raw_query = request.query_params.get("q", "")
+            # **必须先在原始串上判截断**：`normalize_query` 之后再判就看不出
+            # 原来的长度了。设计 §5.3 第 548 行要求截断时带 `notice` 说明。
+            truncated = was_truncated(raw_query)
+            text = normalize_query(raw_query)
             # 夹边界而不是报错：翻页时前端传 200 不该变成一次失败
             # （与 `/api/items` 的 limit 处理口径一致）。
             clamped_limit = (
@@ -299,6 +312,7 @@ def search(
                     limit=clamped_limit,
                     offset=clamped_offset,
                     filter=condition,
+                    truncated=truncated,
                 )
             )
 

@@ -209,9 +209,23 @@ DISPLAYED_ATTRIBUTES: tuple[str, ...] = (
     "source_domain",
 )
 
-#: 单页最大命中数。超过它的结果只能靠 `offset` 翻，翻不到第 1001 条以后。
-#: 个人自用库的量级远低于 1000，设上限是为了让 Meili 的内存占用可预测。
-MAX_TOTAL_HITS = 1000
+#: Meili 单次搜索能返回的最大命中总数（`pagination.maxTotalHits`）。
+#:
+#: ## 必须 ≥ `MAX_OFFSET + MAX_LIMIT`
+#:
+#: 这个数与下面两个分页常量是**一组**，三者互相约束。第一版各写一个值
+#: （999 / 50 / 1000），`offset=999&limit=50` 要求返回第 1000–1049 条，
+#: 而 `maxTotalHits=1000` 会把越界部分**静默截掉**——用户看到「翻到 1000 条
+#: 之后就没有了」，且没有任何提示说明是被上限切断的。QA 抓到这条。
+#:
+#: 取 1050（= 999 + 50 + 1 的整数化）而不是把 `MAX_OFFSET` 降到 950：
+#: **降 offset 上限是无理由砍掉用户能翻到的范围**，而 Meili 多存 50 条的
+#: 内存代价可以忽略。上界由 `tests/test_search_query.py` 的分页常量用例
+#: 校验（`assert MAX_OFFSET + MAX_LIMIT <= MAX_TOTAL_HITS`），改任何一个
+#: 而不同步其余两个就会立刻红。
+#:
+#: 个人自用库远低于这个量级；设上限是为了让 Meili 的内存占用可预测。
+MAX_TOTAL_HITS = 1050
 
 
 def index_settings() -> dict[str, object]:

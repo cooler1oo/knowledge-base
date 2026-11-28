@@ -76,6 +76,25 @@ def normalize_query(raw: str) -> str:
     return _strip_edge_noise(text)[:MAX_QUERY_LEN]
 
 
+def was_truncated(raw: str) -> bool:
+    """规范化后是否发生了截断。**必须在 `normalize_query` 之前调用。**
+
+    设计 §5.3 第 548 行：超 64 字符要「截断到 64 并 `notice` 说明」。
+    用户无从知道后半句被丢弃了——他看到的是一份少了内容的搜索结果，
+    会以为「库里没有」，而不是「我的查询被截了」。
+
+    为什么单独一个函数而不是让 `normalize_query` 返回元组：`normalize_query`
+    有 12 条纯函数用例断言它返回 `str`，改签名会让那批全红。这个函数只做
+    一次比较，代价一次遍历，调用点在 API 层（那里才知道要不要出 `notice`）。
+    """
+    # 与 `normalize_query` 用同一套预处理，否则「带装饰标点的长查询」会算错：
+    # `"【" + "三"*70 + "】"` 剥掉标点后是 70 字 → 该截；
+    # 而只看 `len(raw)` 会把标点也算进去，边界差 2。
+    text = raw.translate(_FULLWIDTH)
+    text = _WHITESPACE_RE.sub(" ", text).strip()
+    return len(_strip_edge_noise(text)) > MAX_QUERY_LEN
+
+
 def build_terms(text: str) -> tuple[str, ...]:
     """把规范化后的查询切成兜底 SQL 用的词块。**按空白切，不猜词边界。**
 
@@ -107,16 +126,43 @@ def build_terms(text: str) -> tuple[str, ...]:
 def quote(value: str) -> str:
     r"""把字符串塞进 Meili 的 filter 表达式。
 
-    Meili 的 filter 语法里字符串用**双引号**包围，内部双引号用反斜杠转义：
-    `tags = "he said \"hi\""`。不转义会得到 `tags = "he said "hi""`，
-    解析器在第二个引号处截断，剩下 `hi""` 被当成语法错误——那是 400，
-    而 400 在搜索路径上**不降级**（会被判成我们的 bug 并抛 500）。
+    Meili 的 filter 语法里字符串用**双引号**包围，内部需要转义的有两个字符。
 
-    反斜杠本身**不转义**：Meili 的 filter 语法只定义了双引号的转义，
-    反斜杠按字面处理。转了会变成两个字符，而库里真的有反斜杠的标签
-    （Windows 路径 `C:\Users`）会匹配不到。
+    ## 两个字符，反斜杠必须**先**转
+
+    | 字符 | 转成 | 不转的后果 |
+    |---|---|---|
+    | `"` | `\"` | 引号提前闭合，剩下半截被当语法错误 → 400 |
+    | `\` | `\\` | **400 `Malformed value`** |
+
+    **顺序有意义**：必须先换 `\` 再换 `"`。反过来时 `"` → `\"` 产生的那个
+    反斜杠会被第二步再转一遍，变成 `\\"`——引号又跑出来了。
+
+    ## ⚠️ 反斜杠必须转义这条，我最初写反了
+
+    第一版 docstring 写的是「反斜杠按字面处理，不转义」，理由是「转了会让库里
+    真有反斜杠的标签匹配不到」。QA 指出这句话是错的，我上平板复验：
+
+    ```
+    标签 C:\Users（真反斜杠）
+      filter 用 1 个反斜杠  → 400 Malformed value（连做 5 次，稳定复现）
+      filter 用 2 个反斜杠  → 200，命中该标签
+      filter 用正斜杠       → 200，命中 C:/Users 那条（不同的标签）
+    ```
+
+    我第一版为什么会写错：早期的两次实验里，我以为在测反斜杠，实际构造的是
+    **正斜杠**（`"C:/Users"`），repr 显示成 `'C://Users'` 让我误以为有转义。
+    是写完 `chr(92)` 逐字节对照才看清的。
+
+    ## 用户影响
+
+    库里存在含反斜杠的标签（粘贴进来的 Windows 路径）→ 用户按该标签筛选 →
+    400 → `MeiliRejected` **不降级**（设计 §6.1 最后一行）→ API 返 500。
+    也就是说这个标签**一点就整个搜索页报错**，不是「筛不出来」。
     """
-    return '"' + value.replace('"', '\\"') + '"'
+    # 顺序不能反：先转反斜杠，再转双引号。见 docstring 的表格。
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return '"' + escaped + '"'
 
 
 def build_filter(condition: SearchFilter) -> str:

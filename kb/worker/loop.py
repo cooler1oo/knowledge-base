@@ -197,7 +197,7 @@ def run_once(
                 )
             elif step == "tag":
                 steps.run_tag(conn, item_id, job_id)
-            else:  # step == "index"
+            elif step == "index":
                 steps.run_index(
                     conn,
                     item_id,
@@ -206,6 +206,34 @@ def run_once(
                     # 上游集合在这里求交：`ocr` 未实现时它自动缺席，
                     # `ocr` 上线后自动生效（设计 §4.3）。
                     upstream=index_upstream(),
+                )
+            else:
+                # ⚠️ **不用 `else: run_index` 兜底**（QA 抓到）。
+                #
+                # 原来的写法是 `if fetch / elif summarize / elif tag / else: index`。
+                # `else` 会兜住一切非前三者——所以 `ocr` 一旦进了
+                # `SUPPORTED_STEPS`（设计 §4.3 承诺「只需把它加进来」），
+                # 它的 job 会被当成 `index` 分派给 `run_index`。
+                #
+                # 后果不是一次失败：`run_index` 拿到一条 `step='ocr'` 的 job，
+                # 会读 items 行写进索引并 `mark_done`——OCR 从没跑过，但 job
+                # 显示完成，而且它作为上游从此不再阻塞 index（已 done），
+                # 正文/OCR 文本**永远**不进索引。全程不报错。
+                #
+                # 现在改成显式 `elif step == "index"` + 这里的兜底分支。
+                # 走到这里说明 `SUPPORTED_STEPS` 里加了一个**没有分派实现**的
+                # 步骤——那是编程错误，退回队列并写明，不猜它是 index。
+                jobs_store.defer(
+                    conn,
+                    job_id,
+                    60.0,
+                    f"已推迟：步骤 {step} 已登记为支持但没有分派实现（装配 bug）",
+                )
+                log.error(
+                    "步骤 %s 在 SUPPORTED_STEPS 里但没有分派实现 item=%s job=%s",
+                    step,
+                    item_id,
+                    job_id,
                 )
         except Exception as exc:  # noqa: BLE001 单条坏数据不能打死整个 worker
             reason = f"{type(exc).__name__}: {exc}"

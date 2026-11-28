@@ -136,6 +136,15 @@ class SearchQuery:
     filter: SearchFilter = field(default_factory=SearchFilter)
     #: `0.0` 表示不截断。见 `config.MIN_SCORE` 的标定注释。
     min_score: float = MIN_SCORE
+    #: 原始查询是否超过 `MAX_QUERY_LEN` 被截断了。
+    #:
+    #: 由 API 层在 `normalize_query` **之前**用 `query.was_truncated(raw)` 判定，
+    #: 再填进来。`SearchService` 只负责把它翻成 `notice`——它拿到的 `text`
+    #: 已经被截过了，自己判不出来（设计 §5.3 第 548 行要求带提示）。
+    #:
+    #: 默认 `False`：构造 `SearchQuery` 的地方（单测、内部调用）不传它时
+    #: 不应凭空多出一条提示。
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
