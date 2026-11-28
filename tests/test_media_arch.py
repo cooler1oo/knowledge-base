@@ -29,9 +29,12 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+from kb.store import attachments as attachments_store
 
 MEDIA_DIR = Path(__file__).resolve().parents[1] / "kb" / "media"
 ROOT = MEDIA_DIR.parents[1]
@@ -364,27 +367,164 @@ def test_没有文件import数据库驱动() -> None:
     assert not offenders, "媒体层不许直连数据库驱动：" + "；".join(offenders)
 
 
-def test_没有文件出现写库SQL() -> None:
-    """放宽到「字符串里出现写库关键字」：错误提示里提到 DELETE 不算，
-    但真写了 SQL 会命中。与 `eng_checks` 的正则口径一致。
+def docstring_nodes(tree: ast.Module) -> set[int]:
+    """模块 / 类 / 函数 docstring 那个 `Constant` 节点的 `id()`。
 
-    注意本文件自己含 `delete from attachments` 字样（在 `attachments.py` 里），
-    所以只查 `kb/media/`，不查 `kb/store/`。
+    ## 为什么必须排除 docstring
+
+    docstring 在 AST 里就是一个 `ast.Constant(str)` 节点，与真正的 SQL 字符串
+    常量**长得一模一样**。不排除的后果是：一句**说明「本层不写库」**的注释
+    反而被判违规——
+
+    ```python
+    # 一句说明「本层不写库」的 docstring：
+    #   本层不执行 delete from attachments（写库在 store 层）
+    #            ^^^^^^^^^^^^^^^ 命中正则 → 误报
+    ```
+
+    实测过：在 `kb/media/layout.py` 里加这一句，这条用例立刻红。
+    而这与 `test_replace_for_item不写on_conflict` 那个 bug 是**同一类**
+    ——「把注释/文档当代码」。那一处是恒红（`getsource` 含注释），
+    这里是误报。两者的危害相同：恒红的断言会被人当噪声关掉。
+
+    ## 为什么仍然要查其他字符串常量
+
+    真正要拦的是 `conn.run("delete from items")` 这种**可执行**的字符串。
+    它也是 `ast.Constant`，但不是 docstring，所以会被保留在检查范围内。
+
+    判据用「节点身份」而不是「是否在文件开头」：用 `ast.get_docstring` 拿不到
+    节点对象，只能拿字符串值，而值可能重复（两处写同一句话）。按 `id()` 排除
+    才不会误杀一个恰好与 docstring 同文的真实 SQL 常量。
     """
-    import re
+    found: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            continue
+        if not node.body:
+            continue
+        first = node.body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            found.add(id(first.value))
+    return found
 
-    pattern = re.compile(
-        r"\b(insert\s+into|update\s+[a-z_]+\s+set|delete\s+from|create\s+table|"
-        r"drop\s+table)\b",
-        re.IGNORECASE,
-    )
+
+#: 写库 SQL 的判据。**只有一份**，被 `test_没有文件出现写库SQL` 与它的自检
+#: 共用 —— 两处各写一份的话，自检改不了被测逻辑，测的就是个副本（实测踩过：
+#: 把真实检查里的 docstring 过滤删掉，自检照样绿）。
+_WRITE_SQL_RE = re.compile(
+    r"\b(insert\s+into|update\s+[a-z_]+\s+set|delete\s+from|create\s+table|"
+    r"drop\s+table)\b",
+    re.IGNORECASE,
+)
+
+
+def write_sql_strings(tree: ast.Module) -> list[tuple[int, str]]:
+    """源码里**可执行**的、命中写库关键字的字符串常量 `(行号, 内容)`。
+
+    docstring 被排除：它是说明文字，不是 SQL。判据见 `docstring_nodes`。
+
+    ## ⚠️ 必须按 `id()` 排除，不能按内容匹配
+
+    后来人最容易「优化」成按内容排除（`if node.value not in docstring_texts`），
+    那样会**把真实的写库 SQL 一起放过**。
+
+    反例：同一个函数里 docstring 与真实 SQL 写的是同一句话——
+
+    ```python
+    def f(conn):
+        \"\"\"delete from items\"\"\"      # docstring，不该报
+        conn.run("delete from items")  # 真实 SQL，必须报
+    ```
+
+    按内容排除：两条的内容都是 `delete from items`，于是**两条都被放过**
+    ——安全检查在最该报警的地方失明。按节点身份（`id()`）排除只影响 docstring
+    那一个节点，函数体里的同文常量仍会被抓。
+
+    注意 `id()` 只在单次 `ast.parse` 的生命周期内有效：`tree` 活着，节点就不会
+    被回收，所以同一个 `tree` 内部比对是安全的。**不要跨 tree 复用 `id()`。**
+    """
+    skip = docstring_nodes(tree)
+    return [
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in skip
+        and _WRITE_SQL_RE.search(node.value)
+    ]
+
+
+def test_没有文件出现写库SQL() -> None:
+    """媒体层不许出现**可执行**的写库 SQL 字符串。
+
+    与 `eng_checks` 的正则口径一致，但**排除 docstring**：docstring 里写
+    「本层不执行 delete from …」是说明文字，不是 SQL。不排除会误报——
+    详见 `docstring_nodes` 的 docstring 与
+    `test_写库SQL检测不把docstring当违规` 那条自检。
+
+    判据在 `write_sql_strings` 里**只有一份**，自检直接调它。这样自检才能
+    真的守住这个检查——只测副本的话，把这里的过滤删掉自检照样绿（实测过）。
+
+    只查 `kb/media/`：`kb/store/attachments.py` 里当然有 `delete from`。
+    """
     offenders: list[str] = []
     for path in media_files():
-        for node in ast.walk(_parse(path)):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                if pattern.search(node.value):
-                    offenders.append(f"{path.name}:{node.lineno}")
+        for lineno, _text in write_sql_strings(_parse(path)):
+            offenders.append(f"{path.name}:{lineno}")
     assert not offenders, "媒体层不许出现写库 SQL：" + "；".join(offenders)
+
+
+def test_写库SQL检测不把docstring当违规() -> None:
+    """**反向自检：这条断言不能抓注释，也不能漏掉真 SQL。**
+
+    `test_replace_for_item不写on_conflict` 踩过的坑是「断言抓到注释 → 恒红」。
+    这里防的是对偶问题：「断言抓到 docstring → 误报」。两者危害相同：
+    恒红/误报的断言会被人当噪声关掉，之后真违规也没人看见。
+
+    ## 为什么必须调 `write_sql_strings` 而不是就地写一份逻辑
+
+    第一版这条自检自己写了一遍过滤（`[n for n in walk if id(n) not in skip]`），
+    结果是**它测的是副本**：把 `test_没有文件出现写库SQL` 里的过滤删掉，
+    这条自检照样绿（已实测）。那是「自检与被测逻辑各自演化」的典型失败。
+    现在只有一份实现，改坏它这条必红。
+
+    ## 为什么五个方向都要验
+
+    - ①②③ docstring（模块/函数/类）提到 `delete from` → 不该报
+    - ④ 真正的 `conn.run("delete from …")` → **必须**报
+    - ⑤ docstring 与真实 SQL 同文 → 只报真实那条
+
+    只验前半会漏掉「过滤过头把真 SQL 也滤了」——那样最危险：检查形同虚设
+    却全绿。⑤ 专门验「按内容去重」这种错误实现。
+    """
+
+    def offenders(src: str) -> list[str]:
+        return [text for _line, text in write_sql_strings(ast.parse(src))]
+
+    # ① 模块 docstring 提到它 → 不报
+    assert offenders('"""本层不执行 delete from items。"""\n') == []
+    # ② 函数 docstring 提到它 → 不报
+    assert (
+        offenders('def f() -> None:\n    """不写 delete from items。"""\n    pass\n')
+        == []
+    )
+    # ③ 类 docstring → 不报
+    assert offenders('class C:\n    """不写 delete from items。"""\n') == []
+    # ④ 真正可执行的 SQL 字符串 → **必须**报
+    assert offenders('def f(conn):\n    conn.run("delete from items")\n') == [
+        "delete from items"
+    ]
+    # ⑤ docstring 与真实 SQL 同文时，仍只报后者
+    mixed = '"""delete from items"""\ndef f(conn):\n    conn.run("delete from items")\n'
+    assert offenders(mixed) == ["delete from items"], (
+        "按内容去重会误杀：docstring 与真实 SQL 同文时，必须只报真实的那条"
+    )
 
 
 # ── 约束四：不许 print ────────────────────────────────────
@@ -402,3 +542,89 @@ def test_没有文件调用print() -> None:
             ):
                 offenders.append(f"{path.name}:{node.lineno}")
     assert not offenders, "kb/ 下不许 print（用 log）：" + "；".join(offenders)
+
+
+# ── 约束五：`_REPLACE_SQL` 的执行依赖锚点 ────────────────────
+#
+# 这两条本是 `tests/test_store_attachments_pg.py` 里的用例，2026-11-28 移到这里。
+#
+# **为什么移**：那个文件后来加了模块级 `pytestmark = pytest.mark.pg`（为了让
+# `-m pg` 能选中它），于是文件里所有用例都带上 pg 标记。而这两条**不需要数据库**
+# ——它们的全部意义就是「在没有真库的环境里也守住锚点」。带标记之后，
+# 任何 `-m "not pg"` 的 CI 配置会静默跳过它们，防线就没了。
+#
+# 实测：`pytest tests/test_store_attachments_pg.py -m "not pg" --collect-only`
+# → `30 tests collected` 变 `no tests collected`。
+#
+# 这个教训与 F2/F3 是同一个：**静态断言不许挂在需要真库的文件上**。
+
+
+def _sql_without_comments(sql: str) -> str:
+    """剥掉 SQL 里的 `--` 行注释。
+
+    ## 为什么断言前必须先剥注释
+
+    `_REPLACE_SQL` 的锚点上方有一大段解释「为什么要引用 `gone`」的注释，
+    而注释里**反复出现 `gone` 这个词**。所以不剥注释时：
+
+    ```python
+    assert "gone" in ins          # 恒真 —— 注释里就有
+    ```
+
+    实测过：把真正的锚点 `where (select count(*) from gone) >= 0` 换成
+    `where true`，这条断言照样绿，因为注释里还留着十几个 `gone`。
+    **断言被自己的注释架空了。**
+
+    这与 `test_replace_for_item不写on_conflict` 是同一类错的第三种形态：
+    - 那次是 `getsource` 把注释当代码 → 恒红
+    - `test_没有文件出现写库SQL` 是把 docstring 当代码 → 误报
+    - 这里是**注释让断言恒真** → 恒绿，最隐蔽（恒绿没人会去看）
+
+    注释里的引号内可能含 `--`（比如 `'-'`），所以只在**未被引号包住**时剥。
+    本项目的 SQL 常量里没有字符串字面量含 `--`，简化为按行首次出现 `--` 截断。
+    """
+    return "\n".join(line.split("--")[0] for line in sql.splitlines())
+
+
+def test_CTE的ins必须依赖gone() -> None:
+    """`_REPLACE_SQL` 的 `ins` 必须引用 `gone`。
+
+    ## 它是次要防线，不是主要防线
+
+    主要防线是 `tests/test_store_attachments_pg.py::test_同key连续替换两次不撞唯一索引`
+    （断言行为，需真库）。这条断言字符串，作用是**在没有真库的环境里也能挡住
+    「把那一行当冗余删掉」** ——因为 pg 用例在本机全部 skip，只留行为用例等于
+    没有防线。
+
+    代价是重构 SQL（换写法但行为不变）时可能误报。这个代价可以接受：
+    `_REPLACE_SQL` 是安全敏感的原子性载体，改它应当被盯着看。
+
+    ## PG 的依据
+
+    文档 §7.8.2：WITH 子语句「以同一快照并发执行，实际顺序不可预测」。
+    外层只读 `ins` 时，`gone`（DELETE）可能被推迟到 INSERT **之后** →
+    旧行还在堆上 → 撞 `attachments_key_uniq`。
+
+    真机 A/B 对照（平板 PG）已确认：保留锚点 → 成功；去掉 → `duplicate key`。
+    """
+    ins = _sql_without_comments(attachments_store._REPLACE_SQL)
+    ins = ins[ins.find("), ins as (") :]
+    assert ins, "找不到 `), ins as (` 这一段——SQL 结构变了，这条断言要跟着改"
+    assert "gone" in ins, (
+        "ins 必须引用 gone，否则 DELETE 可能排在 INSERT 之后，"
+        "重跑同一条内容时撞 attachments_key_uniq"
+    )
+
+
+def test_CTE依赖条件用大于等于0而不是大于0() -> None:
+    """`>= 0` 与 `> 0` 的差别在**首次** fetch 上。
+
+    首次 fetch 时表里没有旧附件，`gone` 一行都没删，`count(*) = 0`。
+    写成 `> 0` 会让第一次写入一条都插不进去——把「重跑会撞」换成
+    「首次全丢」，更糟。
+
+    这条同样用字符串断言（不能靠行为验：`> 0` 的行为失败是「首次写入 0 行」，
+    而首次写入的用例 `test_首次写入返回写入行数` 也能抓到——两条互补）。
+    """
+    sql = _sql_without_comments(attachments_store._REPLACE_SQL)
+    assert ">= 0" in sql, "依赖条件必须是 >= 0，> 0 会让首次 fetch 插不进任何行"

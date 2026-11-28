@@ -29,6 +29,14 @@ from kb.store import attachments as attachments_store
 from kb.store.db import connect
 from kb.store.migrate import discover, migrate
 
+#: 整份文件都要真库。**这个标记不能省**：它让 `-m pg` 能选中本文件。
+#:
+#: 2026-11-28 发现本文件原先只有 `pg_cfg` fixture（连不上就 skip），缺这个标记
+#: ——功能上不影响本机跑（照样 skip），但 `-m pg` 只收集到 76 条而不是 119 条，
+#: 也就是说「在平板上只跑 pg 用例」会静默漏掉本文件全部 43 条，而这 43 条
+#: 正是唯一能验证 CTE 执行顺序与唯一索引的地方。
+pytestmark = pytest.mark.pg
+
 
 @pytest.fixture(scope="session")
 def fresh_db(pg_cfg):
@@ -194,47 +202,6 @@ def test_同一item重复写同一批多行也不撞索引(conn):
         assert written == 3, "多行重跑有行没写进去"
 
     assert len(_rows(conn, item_id)) == 3, "多行重跑产生了重复行"
-
-
-def test_CTE的ins必须依赖gone():
-    """**静态断言，不需要数据库——不许加 `pg` 标记。**
-
-    ## 它是次要防线，不是主要防线
-
-    主要防线是 `test_同key连续替换两次不撞唯一索引`（断言行为）。
-    这条断言字符串，作用是**在没有真库的环境里也能挡住「把那一行当冗余删掉」**
-    ——因为 `pg` 用例在本机全部 skip，只留行为用例等于没有防线。
-
-    代价是重构 SQL（换写法但行为不变）时可能误报。这个代价可以接受：
-    `_REPLACE_SQL` 是安全敏感的原子性载体，改它应当被盯着看。
-
-    ## PG 的依据
-
-    文档 §7.8.2：WITH 子语句「以同一快照并发执行，实际顺序不可预测」。
-    外层只读 `ins` 时，`gone`（DELETE）可能被推迟到 INSERT **之后** →
-    旧行还在堆上 → 撞 `attachments_key_uniq`。
-    """
-    sql = attachments_store._REPLACE_SQL
-    ins = sql[sql.find("), ins as (") :]
-    assert ins, "找不到 `), ins as (` 这一段——SQL 结构变了，这条断言要跟着改"
-    assert "gone" in ins, (
-        "ins 必须引用 gone，否则 DELETE 可能排在 INSERT 之后，"
-        "重跑同一条内容时撞 attachments_key_uniq"
-    )
-
-
-def test_CTE依赖条件用大于等于0而不是大于0():
-    """`>= 0` 与 `> 0` 的差别在**首次** fetch 上。
-
-    首次 fetch 时表里没有旧附件，`gone` 一行都没删，`count(*) = 0`。
-    写成 `> 0` 会让第一次写入一条都插不进去——把「重跑会撞」换成
-    「首次全丢」，更糟。
-
-    这条同样用字符串断言（不能靠行为验：`> 0` 的行为失败是「首次写入 0 行」，
-    而首次写入的用例 `test_首次写入返回写入行数` 也能抓到——两条互补）。
-    """
-    sql = attachments_store._REPLACE_SQL
-    assert ">= 0" in sql, "依赖条件必须是 >= 0，> 0 会让首次 fetch 插不进任何行"
 
 
 def test_内容变化后旧行消失(conn):
