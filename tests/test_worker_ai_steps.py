@@ -71,17 +71,24 @@ def test_run_once_的_ai_client_是第三个位置参数且默认None():
 
     这条形状是**11 处现有调用一行都不用改**的唯一前提。
     加在 `extractor` 之前或改成必填，都会让那 11 处红。
+
+    ⚠️ 断言的是**性质**（前三个参数是这三个、`ai_client` 默认 `None`），
+    不是「参数列表逐字等于这三个」。R8 在后面追加了可选参数 `media_stage`，
+    它不影响这条性质——但改成逐字相等会让它红，而那并不是本条要守的东西。
     """
     import inspect
 
     params = list(inspect.signature(loop.run_once).parameters.items())
-    assert [name for name, _ in params] == ["pool", "extractor", "ai_client"]
+    assert [name for name, _ in params][:3] == ["pool", "extractor", "ai_client"]
     assert params[2][1].default is None
+    # 后面追加的参数必须全部有默认值，否则现有调用会红
+    for name, param in params[3:]:
+        assert param.default is not inspect.Parameter.empty, f"{name} 没有默认值"
 
 
 def test_run_forever_的_ai_client_在on_tick之后且默认None():
     """`kb/worker/__main__.py` 用关键字传 `idle_seconds`，所以顺序必须是
-    `pool, extractor, idle_seconds, on_tick, ai_client`。
+    `pool, extractor, idle_seconds, on_tick, ai_client`（之后可追加可选项）。
 
     把 `ai_client` 插在 `extractor` 之后（第三个位置）会让
     `run_once(pool, extractor, 2.0)` 这类写法把浮点数当客户端传进去。
@@ -89,7 +96,7 @@ def test_run_forever_的_ai_client_在on_tick之后且默认None():
     import inspect
 
     params = list(inspect.signature(loop.run_forever).parameters.items())
-    assert [name for name, _ in params] == [
+    assert [name for name, _ in params][:5] == [
         "pool",
         "extractor",
         "idle_seconds",
@@ -97,6 +104,8 @@ def test_run_forever_的_ai_client_在on_tick之后且默认None():
         "ai_client",
     ]
     assert params[4][1].default is None
+    for name, param in params[5:]:
+        assert param.default is not inspect.Parameter.empty, f"{name} 没有默认值"
 
 
 def test_SUPPORTED_STEPS_是三个步骤_AI_07_AI_09():

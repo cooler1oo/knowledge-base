@@ -34,6 +34,35 @@ def test_discover_real_migrations_are_continuous():
     assert len(found) >= 3
 
 
+def test_README的编号提示与实际最大版本一致():
+    """README 里「现有最大 NNNN → NNNN+1」这句必须跟实际文件对得上。
+
+    为什么要守一个注释：这句是「加新迁移」那一步唯一的指路牌，而它漂移时
+    没有任何症状——照抄的人会 `touch 0004_add_xxx.sql`，撞上已存在的 0004，
+    或者更糟：写成 `0004_xxx.sql` 覆盖掉 `0004_seed_ai_tags.sql` 的编号，
+    迁移器报「版本重号」而那时人已经在改别的东西了。
+
+    2026-11-28 实测漂移过两个版本：`0004_seed_ai_tags.sql` 已存在时
+    README 还写着「现有最大 0003 → 0004」。当时无任何用例覆盖。
+    """
+    found = discover(MIGRATIONS_DIR)
+    largest = max(m.version for m in found)
+    readme = (MIGRATIONS_DIR / "README.md").read_text(encoding="utf-8")
+
+    hint = re.search(r"现有最大\s*(\d{4})\s*→\s*(\d{4})", readme)
+    assert hint is not None, "README 里找不到「现有最大 NNNN → NNNN」提示句"
+
+    stated_largest = int(hint.group(1))
+    stated_next = int(hint.group(2))
+    assert stated_largest == largest, (
+        f"README 说现有最大是 {stated_largest:04d}，实际最大是 {largest:04d}。"
+        f"改 README 的那句提示。"
+    )
+    assert stated_next == largest + 1, (
+        f"README 说下一个编号是 {stated_next:04d}，应为 {largest + 1:04d}"
+    )
+
+
 def _write(directory: Path, name: str, sql: str = "select 1") -> None:
     (directory / name).write_text(sql, encoding="utf-8")
 

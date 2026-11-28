@@ -364,6 +364,10 @@ def test_run_forever_把_ai_client_透传给_run_once():
 
     这条挡住「`__main__` 构造了客户端但忘了透传」——那种情况下
     worker 会一直走「AI 客户端未装配」的推迟分支，而日志里看不出问题。
+
+    探针用 `*args` 收参数而不是抄一份固定签名：`run_once` 后面追加可选的
+    `media_stage`（R8）时，这条用例不该因为签名多一个可选项就红
+    ——它要验的是「`ai_client` 有没有被透传」，不是「参数列表有几个」。
     """
     seen: list[object] = []
     client = _FakeSummarizer()
@@ -381,8 +385,10 @@ def test_run_forever_把_ai_client_透传给_run_once():
 
     original = loop.run_once
 
-    def _spy(pool: object, extractor: object, ai_client: object = None) -> bool:
-        seen.append(ai_client)
+    def _spy(*args: object) -> bool:
+        # 第三个位置参数就是 ai_client（§4.2.1 的形状由
+        # `tests/test_worker_ai_steps.py` 单独钉住）
+        seen.append(args[2] if len(args) > 2 else None)
         return False
 
     loop.run_once = _spy  # type: ignore[assignment]
@@ -397,6 +403,8 @@ def test_run_forever_把_ai_client_透传给_run_once():
             )
     finally:
         loop.run_once = original  # type: ignore[assignment]
+
+    assert seen == [client], f"ai_client 没被透传：{seen}"
 
     assert seen == [client], f"ai_client 没被透传：{seen}"
 
