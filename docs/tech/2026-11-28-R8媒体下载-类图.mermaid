@@ -1,0 +1,186 @@
+classDiagram
+    direction LR
+
+    %% ── 值对象：全部 frozen，无行为 ──────────────────────────
+    class MediaSpec {
+        <<frozen dataclass>>
+        +str role
+        +str url
+        +int sort_order
+    }
+
+    class PinnedTarget {
+        <<frozen dataclass>>
+        +str connect_url
+        +str host_header
+        +str sni_hostname
+    }
+
+    class DownloadedBlob {
+        <<frozen dataclass>>
+        +str role
+        +str url
+        +int sort_order
+        +bytes data
+        +str mime
+        +str ext
+    }
+
+    class StoredBlob {
+        <<frozen dataclass>>
+        +str role
+        +str storage_key
+        +str mime
+        +int size_bytes
+        +int width
+        +int height
+        +int duration_sec
+        +str sha256
+        +int sort_order
+    }
+
+    class SkippedMedia {
+        <<frozen dataclass>>
+        +str role
+        +str url
+        +str reason
+    }
+
+    class MediaResult {
+        <<frozen dataclass>>
+        +tuple~StoredBlob~ stored
+        +tuple~SkippedMedia~ skipped
+    }
+
+    %% ── 注入点（Protocol）────────────────────────────────────
+    class Resolver {
+        <<Protocol>>
+        +__call__(host, port) list~str~
+    }
+
+    class Downloader {
+        <<Protocol>>
+        +get(target, max_bytes, deadline) tuple
+    }
+
+    class ImageEncoder {
+        <<Protocol>>
+        +normalize(data, long_side, max_bytes) tuple
+    }
+
+    %% ── 纯逻辑层：不联网、不碰 IO、不碰数据库 ────────────────
+    class layout {
+        <<module>>
+        +KEY_RE
+        +MIME_EXT
+        +storage_key(item_id, content_sha256, ext) str
+        +is_valid_key(key) bool
+        +ext_for_mime(mime) str
+    }
+
+    class sniff {
+        <<module>>
+        +ALLOWED_PREFIXES
+        +FORBIDDEN_MIMES
+        +sniff_mime(data, header_value) tuple
+        +mime_matches_role(mime, role) bool
+    }
+
+    class plan {
+        <<module>>
+        +MAX_IMAGES_PER_ITEM
+        +MAX_SOURCE_BYTES
+        +plan_attachments(media, kind, max_images) list~MediaSpec~
+    }
+
+    class guard {
+        <<module>>
+        +_EMBEDDED_V4: 5 个内嵌 v4 形式，一律拒
+        +_DENY_V4: 11 段
+        +_DENY_V6: 8 段
+        +is_public_ip(ip) bool
+        +check_url(url, resolver) PinnedTarget
+    }
+
+    %% ── 装配层：唯一碰外部库的地方，库在方法内 import ────────
+    class HttpxDownloader {
+        <<implements Downloader>>
+        -client_factory
+        -clock
+        +get(target, max_bytes, deadline) tuple
+    }
+
+    class PillowEncoder {
+        <<implements ImageEncoder>>
+        +normalize(data, long_side, max_bytes) tuple
+    }
+
+    class persist {
+        <<module>>
+        +store_media(specs, item_id, media_root, downloader, encoder, resolver, clock, stage_budget_sec) MediaResult
+    }
+
+    %% ── 存储层：只有这里出现写库 SQL ─────────────────────────
+    class attachments_store {
+        <<module kb/store>>
+        +replace_for_item(conn, item_id, blobs) int
+        +mime_for_key(conn, key) str
+        +stats(conn, item_id) dict
+    }
+
+    class items_store {
+        <<module kb/store 已有>>
+        +apply_extract(conn, item_id, ...) None
+        +get_item(conn, item_id) ItemDetail
+    }
+
+    %% ── API 层 ───────────────────────────────────────────────
+    class media_api {
+        <<module kb/api>>
+        +file_response(pool, media_root) Handler
+    }
+
+    class SessionMiddleware {
+        <<已有>>
+        +dispatch(request, call_next) Response
+    }
+
+    class worker_steps {
+        <<module kb/worker>>
+        +run_fetch(conn, item_id, job_id, extractor) None
+        +_outcome_to_kwargs(item_url, outcome) dict
+    }
+
+    %% ── 关系 ─────────────────────────────────────────────────
+    plan ..> MediaSpec : 产出
+    guard ..> PinnedTarget : 产出
+    persist ..> MediaSpec : 消费
+    persist ..> StoredBlob : 产出
+    persist ..> MediaResult : 产出
+    persist ..> SkippedMedia : 产出
+    DownloadedBlob ..> StoredBlob : 压缩后转换
+
+    persist o-- Downloader : 注入
+    persist o-- ImageEncoder : 注入
+    persist o-- Resolver : 注入
+    guard o-- Resolver : 注入
+
+    persist ..> layout : 调用 storage_key
+    persist ..> sniff : 调用 sniff_mime
+    persist ..> guard : 调用 check_url
+
+    HttpxDownloader ..|> Downloader
+    PillowEncoder ..|> ImageEncoder
+
+    worker_steps ..> plan : 调用
+    worker_steps ..> persist : 调用
+    worker_steps ..> attachments_store : 落库
+    worker_steps ..> items_store : 写 props
+
+    media_api ..> attachments_store : mime_for_key
+    media_api ..> layout : is_valid_key
+    SessionMiddleware ..> media_api : 守门（未登录 401）
+
+    note for persist "不 import kb.store：输入 list[MediaSpec]，<br/>输出 MediaResult，落库由 worker 做"
+    note for attachments_store "全项目唯一允许出现<br/>写入 attachments 的 SQL 的地方"
+    note for HttpxDownloader "trust_env=False / follow_redirects=False<br/>连 IP + Host 头 + sni_hostname"

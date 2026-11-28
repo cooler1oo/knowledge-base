@@ -1,0 +1,163 @@
+sequenceDiagram
+    autonumber
+    participant W as worker<br/>steps.run_fetch
+    participant Ext as extractor<br/>ParseHub
+    participant IS as kb/store/items
+    participant P as media/plan
+    participant Pers as media/persist
+    participant G as media/guard
+    participant Sn as media/sniff
+    participant Enc as media/encode
+    participant D as media/fetch
+    participant FS as media_root 磁盘
+    participant AS as kb/store/attachments
+    participant JS as kb/store/jobs
+
+    Note over W,JS: ── 阶段一：抓取元数据（已有逻辑，不改）──
+    W->>IS: get_item(item_id)
+    IS-->>W: ItemDetail (url ...)
+    alt url 为空（纯文字条目）
+        W->>IS: apply_extract(ok=False, error="无链接可抓")
+        W->>JS: mark_done(job_id)
+    end
+
+    W->>Ext: extractor(url)
+    alt 抓取抛异常 / outcome.ok == False
+        Ext-->>W: ExtractOutcome(ok=False, error=...)
+        W->>IS: apply_extract(ok=False, error)
+        W->>JS: mark_failed(job_id, error)
+        Note over W: **不进入媒体阶段**（没有内容可下）
+    end
+    Ext-->>W: ExtractOutcome(ok=True, data.media)
+
+    W->>IS: apply_extract(ok=True, title, content_text, kind, media)
+    Note over IS: 元数据先落库。<br/>即使后面媒体全失败，这条内容已经可用
+
+    Note over W,FS: ── 阶段二：媒体下载（本轮新增）──
+    Note over W,P: 封面回落链（互斥，产出不重复）
+    W->>P: plan_attachments(media, kind)
+    Note over P: ① 有 thumbUrl → MediaSpec(role='cover', ord=0)<br/>② 无 thumbUrl 但有 role='image' → **不额外产 spec**，<br/>　 只记下用 media[0] 当主视觉（它已作为 image 下载）<br/>③ 都没有 → 无 cover，primary_media=null<br/>④ role='image' 逐条 → MediaSpec(role='image', ord 递增)<br/>⑤ role='video' 不下（M4-07 P2）<br/>⚠️ 同一份字节只产一条 spec：否则两条同 key<br/>　 会撞 attachments_key_uniq（见 §6.3）
+    P-->>W: list[MediaSpec]（已去重，storage_key 两两不同）
+
+    alt specs 为空（无封面无配图）
+        Note over W: 跳过媒体阶段，直接走阶段三
+    end
+
+    W->>Pers: store_media(specs, item_id, media_root,<br/>downloader, encoder, resolver, stage_budget_sec=90)
+    activate Pers
+
+    loop 每一个 MediaSpec（串行，不并发）
+        Pers->>Pers: 检查阶段总预算（clock() - started > 90s ?）
+        alt 预算已耗尽
+            Pers->>Pers: 记 SkippedMedia(reason='阶段超时')
+        end
+
+        Pers->>G: check_url(spec.url, resolver)
+        alt scheme 非 http/https 或端口非 80/443 或带账号
+            G-->>Pers: 拒绝原因 str
+            Pers->>Pers: 记 SkippedMedia
+        end
+
+        alt hostname 是 IP 字面量
+            G->>G: 直接 is_public_ip(hostname)，不经 DNS
+        else hostname 是域名
+            G->>G: resolver(host, port) → IP 列表
+        end
+        G->>G: 对**每一个** IP 跑 is_public_ip（三步）<br/>① 内嵌 v4 形式一律拒<br/>　（::ffff:0:0/96 64:ff9b::/96<br/>　 64:ff9b:1::/48 2002::/16 2001::/32）<br/>② 硬编码拒绝段（比 version）<br/>③ is_global 为真且六项 not 为真
+        alt 任一 IP 不合格
+            G-->>Pers: 拒绝原因 str（含那个 IP）
+            Pers->>Pers: 记 SkippedMedia
+        end
+        G-->>Pers: PinnedTarget(connect_url=IP+path,<br/>host_header=host, sni_hostname=host)
+
+        Pers->>D: get(target, max_bytes=8MiB, deadline=20s)
+        activate D
+        Note over D: trust_env=False（不走代理）<br/>follow_redirects=False（3xx 不跟随）<br/>连 IP，带 Host 头与 sni_hostname
+        alt 3xx 重定向
+            D-->>Pers: (3xx, headers, b'')
+            Pers->>Pers: 记 SkippedMedia(reason='重定向不跟随')
+        else 非 2xx
+            D-->>Pers: (status, headers, body)
+            Pers->>Pers: 记 SkippedMedia(reason='HTTP status')
+        else 读超 8MiB 或超 20 秒
+            D-->>Pers: raise DownloadTooLarge / DownloadTimeout
+            Pers->>Pers: 记 SkippedMedia
+        else 2xx
+            D-->>Pers: (200, headers, data)
+        end
+        deactivate D
+
+        Pers->>Sn: sniff_mime(data, headers['content-type'])
+        Note over Sn: ① 剥 ;charset=<br/>② 白名单内且未被禁 → 采信 header<br/>③ octet-stream/空/非白名单 → 查魔数<br/>④ 查不出 → None
+        alt 判不出 mime
+            Sn-->>Pers: None
+            Pers->>Pers: 记 SkippedMedia(reason='mime 无法判定')
+        end
+        Sn-->>Pers: (mime, 依据)
+        Pers->>Sn: mime_matches_role(mime, spec.role)
+        alt mime 与 role 不符（如 cover 拿到 video/*）
+            Pers->>Pers: 记 SkippedMedia
+        end
+
+        Pers->>Enc: normalize(data, long_side=1600, max_bytes=200KiB)
+        activate Enc
+        Note over Enc: PIL 在方法内 import<br/>只在需要时重编码，不改放大
+        Enc-->>Pers: (data, width, height)
+        deactivate Enc
+
+        Pers->>Pers: sha256 = sha256(data)
+        Pers->>Pers: key = layout.storage_key(item_id, sha256, ext_for_mime(mime))
+        Pers->>FS: 若 (media_root/key) 已存在 → 跳过写
+        Pers->>FS: 否则写 media_root/.incoming/<uuid>.part 再 os.replace 到正式路径
+        alt 磁盘写入失败（满 / 只读）
+            FS-->>Pers: OSError
+            Pers->>Pers: 记 SkippedMedia(reason='写盘失败')
+        end
+        Pers->>Pers: 收集 StoredBlob
+    end
+
+    Pers-->>W: MediaResult(stored, skipped)
+    deactivate Pers
+
+    Note over W,AS: ── 阶段三：落库（媒体失败不影响此处）──
+    alt stored 非空
+        W->>AS: replace_for_item(conn, item_id, stored, primary_role=...)
+        Note over AS: ① delete where item_id=:i and role in ('cover','image')<br/>② 逐条 insert ... returning id（≤21 条，毫秒级）<br/>③ update items set primary_media = :pid<br/>　 无匹配行时**显式写 null**（该列无外键，<br/>　 不写会残留指向已删行的旧指针）<br/>⚠️ 两条独立语句，kb/store 无事务（见 §6.2）
+        AS-->>W: 写入行数
+    end
+    alt skipped 非空
+        W->>IS: 写 props.mediaError = 汇总串
+        Note over IS: **不写 jobs.error**，<br/>否则条目会显示成「处理失败」
+    end
+    W->>IS: 写 props.primaryMedia（视频条目指向封面附件 id）
+
+    Note over W,JS: ── 阶段四：收尾（顺序不可反）──
+    W->>JS: mark_done(fetch)
+    W->>JS: enqueue(summarize)
+
+    Note over W,d: ══ 完全独立的读路径：GET /api/media/{key} ══
+    participant U as 浏览器 img src
+    participant M as SessionMiddleware
+    participant MA as api/media
+    participant AS2 as kb/store/attachments
+
+    U->>M: GET /api/media/ab/cdef….jpg（自动带 Cookie）
+    alt 未登录
+        M-->>U: 401（路径不在 PUBLIC_PATHS）
+    end
+    M->>MA: file_response(pool, media_root)
+    MA->>MA: layout.is_valid_key(key)
+    alt 格式不符（含 ../ 或大写或多余斜杠）
+        MA-->>U: 404（不是 400，避免成为存在性探针）
+    end
+    MA->>AS2: mime_for_key(conn, key)
+    alt 查不到
+        AS2-->>MA: None
+        MA-->>U: 404
+    end
+    AS2-->>MA: mime
+    MA->>MA: (media_root/key).resolve().is_relative_to(media_root.resolve())
+    alt 越界
+        MA-->>U: 404
+    end
+    MA->>U: FileResponse(media_type=mime)<br/>Cache-Control: private, max-age=31536000, immutable<br/>（Starlette 1.10 自带 Range 支持，视频拖动进度可用）
