@@ -625,10 +625,49 @@ def run_index(
 
     doc = search_store.index_source_row(conn, item_id)
     if doc is None:
-        # 条目不存在或已软删。**标 done 而不是 failed**：这不是错误，
-        # 是「这条内容不该在索引里」。rebuild 的差集会把它从索引里清掉。
+        # ── M4-03：条目不存在或已软删 → **从索引里删掉**，再标 done ──
+        #
+        # 改之前这里是「标 done 什么都不写」，靠 `rebuild` 的差集清理。
+        # 那有个致命的时间窗：软删后到下次手工 rebuild 之间（可能几个月），
+        # 那条内容在搜索结果里还在——点进去 404。而 `estimatedTotal` 也算上它，
+        # 用户看到「搜到 12 条」实际只有 11 条能打开。
+        #
+        # 现在在这里直接删。**不加存在性检查**：已实测（2026-11-28，平板
+        # Meili 1.58.0）对不存在的 id 调 delete-batch 返回
+        # `succeeded` + `deletedDocuments: 0`，静默跳过不报错：
+        #
+        #     POST .../documents/delete-batch -d '[999999999]'
+        #     → task 222 status: "succeeded"
+        #       details: {"providedIds":1,"deletedDocuments":0}
+        #
+        # 所以省掉一次 `index_document_ids` 往返。
+        #
+        # ⚠️ `delete_ids` **不等任务**（只发请求拿 taskUid），与 `upsert` 同一
+        # 口径。代价是「标 done 后 1–2 秒索引才真删掉」，对单人使用无影响。
+        #
+        # 把它放在 `try` 里是为了复用下面的三类失败分级：Meili 挂 → defer 60 秒
+        # （任务留在队列里下次再删），401 → defer 600 秒。**不能用 mark_failed**
+        # ——「索引服务挂了」不是这条内容的错，判死之后回收站里的内容会永远
+        # 留在索引里。
+        try:
+            indexer.delete_ids([item_id])
+        except MeiliUnauthorized as exc:
+            jobs_store.defer(
+                conn,
+                job_id,
+                DEFER_MEILI_UNAUTHORIZED_SEC,
+                f"已推迟：索引服务拒绝访问，检查 KB_MEILI_KEY（{exc}）",
+            )
+            log.warning("索引删除被拒绝 item=%s job=%s：%s", item_id, job_id, exc)
+            return
+        except MeiliUnavailable as exc:
+            jobs_store.defer(
+                conn, job_id, DEFER_MEILI_DOWN_SEC, f"已推迟：索引服务不可用（{exc}）"
+            )
+            log.warning("索引删除时服务不可用 item=%s job=%s：%s", item_id, job_id, exc)
+            return
         jobs_store.mark_done(conn, job_id)
-        log.info("条目不存在或已删，跳过索引 item=%s job=%s", item_id, job_id)
+        log.info("条目不存在或已删，已从索引移除 item=%s job=%s", item_id, job_id)
         return
 
     try:

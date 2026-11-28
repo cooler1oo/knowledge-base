@@ -28,17 +28,34 @@ from kb.worker import loop, steps
 
 
 class FakeIndexer:
-    """只记调用。`raises` 让某次 `upsert` 抛指定异常。"""
+    """只记调用。`raises` 让某次 `upsert` 抛指定异常；
+    `fail_delete` 让 `delete_ids` 抛指定异常（M4-03 新增）。"""
 
-    def __init__(self, raises: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        raises: BaseException | None = None,
+        *,
+        fail_delete: BaseException | None = None,
+    ) -> None:
         self.upserted: list[list[IndexDoc]] = []
+        self.deleted: list[list[int]] = []
         self.raises = raises
+        self.fail_delete = fail_delete
+        #: `delete_ids` 是否调用过 `wait_task`。`Indexer.delete_ids` 不等任务
+        #: （与 `upsert` 同口径），这里记一笔让用例能断言。
+        self.waited = False
 
     def upsert(self, docs: list[IndexDoc]) -> int:
         if self.raises is not None:
             raise self.raises
         self.upserted.append(list(docs))
         return len(docs)
+
+    def delete_ids(self, ids: list[int]) -> int:
+        if self.fail_delete is not None:
+            raise self.fail_delete
+        self.deleted.append(list(ids))
+        return len(ids)
 
 
 class Conn:
@@ -412,19 +429,79 @@ def test_先判上游再读数据() -> None:
     assert upstream_at < read_at, f"读数据的语句在判上游之前：{conn.seen}"
 
 
-def test_条目不存在时标done不写索引() -> None:
-    """条目不存在或已软删：**标 done 而不是 failed**。
+def test_条目不存在时标done并从索引删掉() -> None:
+    """条目不存在或已软删：**先删索引，再标 done**（M4-03 改了这一步）。
 
-    这不是错误，是「这条内容不该在索引里」。rebuild 的差集会把它从索引里清掉
-    （如果它曾经在）。标 failed 会让导出的条目显示「处理失败」，
-    用户会对一条已经不存在的记录点重试。
+    ## 为什么从「什么都不写」改成「删掉索引」
+
+    原实现靠 `rebuild` 的差集清理。那有个致命时间窗：软删后到下次手工
+    rebuild 之间（可能几个月），那条内容在搜索结果里还在——点进去 404，
+    而 `estimatedTotal` 也算上它（用户看到「搜到 12 条」实际 11 条能打开）。
+
+    ## 仍然是 done 不是 failed
+
+    这不是错误，是「这条内容不该在索引里」。标 failed 会让条目显示
+    「处理失败」，用户会对一条已经不存在的记录点重试。
     """
     conn = Conn(doc=None)
     indexer = FakeIndexer()
     _run(conn, indexer=indexer)
 
+    # 不 upsert
     assert indexer.upserted == []
+    # 但要 delete
+    assert indexer.deleted == [[1]], f"应从索引删掉，实际 deleted={indexer.deleted}"
+    # 仍是 done
     assert conn.sql_of("state = 'done'")
+    assert not conn.sql_of("state = 'failed'")
+
+
+def test_条目不存在时删索引不等任务() -> None:
+    """`delete_ids` 只发请求拿 taskUid，不等任务完成（与 `upsert` 同一口径）。
+
+    代价是「标 done 后 1–2 秒索引才真删掉」，对单人使用无影响。
+    等任务会把一步变成秒级阻塞，而 worker 是单线程的——队列会停摆。
+    """
+    conn = Conn(doc=None)
+    indexer = FakeIndexer()
+    _run(conn, indexer=indexer)
+
+    assert indexer.waited is False, "delete_ids 不该等任务"
+
+
+def test_条目不存在时索引删除挂掉走defer不是failed() -> None:
+    """Meili 挂了 → defer 60 秒，任务留在队列里下次再删。
+
+    **不能用 mark_failed**：三次之后这条内容被判死，而「索引服务挂了」
+    不是它的错。回收站里的内容会永远留在索引里。
+    """
+    from kb.search.models import MeiliUnavailable
+
+    conn = Conn(doc=None)
+    indexer = FakeIndexer(fail_delete=MeiliUnavailable("挂了"))
+    _run(conn, indexer=indexer)
+
+    assert conn.sql_of("run_after"), "应 defer 而不是结束"
+    assert not conn.sql_of("state = 'failed'")
+    assert not conn.sql_of("state = 'done'")
+
+
+def test_条目不存在时索引删除401走长defer() -> None:
+    """401 → defer 600 秒（不是 60）。密钥填错是配置问题，改完配置就该恢复。"""
+    from kb.search.models import MeiliUnauthorized
+
+    conn = Conn(doc=None)
+    indexer = FakeIndexer(fail_delete=MeiliUnauthorized("401"))
+    _run(conn, indexer=indexer)
+
+    # `defer` 的 reason 走绑定参数 `e`，不在 SQL 文本里
+    reasons = [str(p.get("e", "")) for p in conn.params_of("update jobs set")]
+    assert any("KB_MEILI_KEY" in r for r in reasons), (
+        f"error 里要写 KB_MEILI_KEY，实际 {reasons}"
+    )
+    # 600 秒而不是 60
+    delays = [p.get("seconds") for p in conn.params_of("update jobs set")]
+    assert 600 in delays, f"401 应 defer 600 秒，实际 {delays}"
     assert not conn.sql_of("state = 'failed'")
 
 
