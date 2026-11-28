@@ -653,6 +653,72 @@ def test_翻过最后一页时不该放宽重查() -> None:
     )
 
 
+def test_库里0条且已翻页时不该再放宽一次() -> None:
+    """#9 修复后残留的一个边界：`total == 0` 且 `offset > 0`。
+
+    工程师修复时定的判据是 `paging = total is not None and 0 < total <= offset`
+    —— 这个判据正确挡住了「翻到尾部」与「翻过头」，但**没挡 `total == 0`
+    且 `offset > 0`**：
+
+    | total | offset | 当前行为 | 应该 |
+    |---|---|---|---|
+    | 0 | 0 | 放宽（库里没有 → 确认一次，合理） | 不放宽也可以，但代价小 |
+    | 0 | 20 | **放宽** ← 本条 | **不放宽** |
+    | 30 | 30 | 不放宽 ✅ | 不放宽 |
+
+    `total=0 且 offset>0` 是「用户在第 1 页看到空结果，还点了下一页」。
+    此时：
+
+    - 库里确实 0 条，没有任何东西可放宽出来
+    - 却又白打一次 Meili（strict + relaxed = 双倍 QPS）
+    - 放宽后的 `estimatedTotalHits` 若返回非 0（Meili 在无阈值时可能给出
+      不同的估计），`estimatedTotal` 会从 0 吹成一个大数，分页器显示
+      「还有 180 条」——用户会一直翻，每页都空
+
+    判据改法（一行）：把 `paging` 改成 `total is not None and total <= offset`，
+    即 `total=0, offset=0` 仍放宽（`0 <= 0` 为真 → 反而挡住），需要写成
+    `total is not None and (total <= offset and offset > 0)`，或者更直白：
+
+    ```
+    paging = total is not None and (total == 0 and query.offset > 0
+                                    or total > 0 and total <= query.offset)
+    ```
+
+    简化成 `total is not None and total < query.offset + 1 and query.offset > 0`。
+    """
+
+    class _Client:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def search(
+            self, index_uid: str, payload: dict[str, object]
+        ) -> dict[str, object]:
+            strict = "rankingScoreThreshold" in payload
+            self.calls.append("strict" if strict else "relaxed")
+            if strict:
+                return {"hits": [], "estimatedTotalHits": 0}
+            return {
+                "hits": [{"id": 1, "title": "噪音", "_rankingScore": 0.1}],
+                "estimatedTotalHits": 200,
+            }
+
+    meili = _Client()
+    service = SearchService(meili, lambda q: [], clock=lambda: 0.0)
+
+    # 第 1 页空、用户点了下一页
+    result = service.run(SearchQuery(text="营销", limit=20, offset=20))
+
+    assert len(meili.calls) == 1, (
+        f"库里 0 条、用户在第 2 页，却又打了一次 Meili（{meili.calls}）。"
+        "没有任何东西可放宽出来。"
+    )
+    assert result.estimated_total == 0, (
+        f"estimatedTotal 从 0 吹成 {result.estimated_total}："
+        "分页器会显示「还有 N 条」，用户一直翻、每页都空。"
+    )
+
+
 # ══════════════════════════════════════════════════════════════
 # 9. 同步 HTTP 在 async handler 里阻塞事件循环（P1，架构面）
 # ══════════════════════════════════════════════════════════════
