@@ -75,6 +75,9 @@ def main(argv: list[str] | None = None) -> int:
         problems.append(git_rules.Problem("取不到内容哈希", str(exc)))
     else:
         problems += git_rules.check_last_green(ROOT / git_rules.MARKER_REL, tree)
+        # pg 覆盖只作提示：本机无 Postgres，全跳过不是错误，但「这条绿灯不含
+        # 真库验证」这件事必须说出来，否则读的人会以为 passed 就是验过了。
+        print(f"[eng-checks] {git_rules.pg_coverage_note(ROOT / git_rules.MARKER_REL)}")
     return _report(problems, "交付前自检")
 
 

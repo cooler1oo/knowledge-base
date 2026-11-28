@@ -241,10 +241,25 @@ def working_tree_hash(root: Path | None = None) -> str:
     return digest.hexdigest()
 
 
-def write_last_green(marker: Path, tree: str, at: datetime) -> None:
+def write_last_green(
+    marker: Path,
+    tree: str,
+    at: datetime,
+    pg_seen: dict[str, int] | None = None,
+) -> None:
+    """写留痕。`pg_seen` 记这次会话里 `@pytest.mark.pg` 跑过/跳过各多少条。
+
+    为什么要记：pg 用例在本机全部 skip，而「唯一索引冲突」「旧值残留」这类
+    缺陷只存在于真实 SQL 语义里。两种绿灯（含 pg / 全跳过 pg）价值不同，
+    不区分就等于看不出「真库验过没」。
+    """
     marker.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {"tree": tree, "at": at.isoformat()}
+    if pg_seen is not None:
+        payload["pgPassed"] = pg_seen.get("passed", 0)
+        payload["pgSkipped"] = pg_seen.get("skipped", 0)
     marker.write_text(
-        json.dumps({"tree": tree, "at": at.isoformat()}, ensure_ascii=False),
+        json.dumps(payload, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -284,3 +299,31 @@ def check_last_green(marker: Path, current_tree: str) -> list[Problem]:
             )
         ]
     return []
+
+
+def pg_coverage_note(marker: Path) -> str:
+    """这条绿灯到底含不含真库验证——只作提示，不判失败。
+
+    pg 用例在本机必然全 skip（没有 Postgres），所以「全跳过」不是错误，
+    但它意味着唯一索引冲突、旧值残留这类缺陷这次一条都没查。把这件事说出来，
+    比让人以为「passed 就是验过了」安全。
+
+    2026-11-28 的教训：本机 1021 passed 全绿时，`mediaTruncated` 残留键的
+    bug 一直藏在 skip 后面，到平板真库才炸出来。
+    """
+    data = read_last_green(marker) or {}
+    passed = data.get("pgPassed")
+    skipped = data.get("pgSkipped")
+    if passed is None and skipped is None:
+        return "pg 覆盖未知（这条留痕是旧版写的，重跑一次即可记录）"
+    passed_n = int(passed or 0)
+    skipped_n = int(skipped or 0)
+    if skipped_n and not passed_n:
+        return (
+            f"pg 用例 {skipped_n} 条**全部跳过**（本机无 Postgres）："
+            "唯一索引冲突 / 旧值残留这类缺陷这次没查。"
+            "要验请到平板真库跑，见 HANDOFF「平板真库怎么跑测试」"
+        )
+    if passed_n:
+        return f"pg 用例 {passed_n} 条在真库上跑过，{skipped_n} 条跳过"
+    return "本次没有 pg 用例"
