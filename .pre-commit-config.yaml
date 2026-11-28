@@ -37,6 +37,11 @@ repos:
         entry: python -m tools.eng_checks --staged
         language: system
         pass_filenames: false
+      # 2026-11-28 事故：R6 七个任务全交付并推送，任务总表一行没标 done。
+      # 根因不是「忘了看一眼」，是「把表当参考资料，而它是工程顺序的唯一权威」。
+      # 所以不写「请记得更新表格」，写成钩子：动了 kb/ 或 tools/ 却没动表格就提交不上。
+      # 挂在 --staged 里（上面那条），因为它已经拿到了暂存文件列表。
+      # 另加一条独立检查：未提交时也能手动跑 `--task-table` 查表格与代码事实是否自洽。
       # 规矩不写在文档里靠人记，写成这条钩子：暂存了文档就必须过检查
       - id: doc-checks
         name: 文档规则（只查暂存文档）

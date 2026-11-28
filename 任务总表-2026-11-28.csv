@@ -19,12 +19,12 @@
 18,M3-05,需求,R5,图片一次调用产出 OCR + 描述,P0,todo,,图片一次调用产出 OCR+描述,worker ocr 步未实现（loop.py 明写）
 19,M3-07,需求,R5,跨内容自动关联,P2,todo,,跨内容自动关联,P2，未实现
 20,M3-08,需求,R5,类型修正被记住（域名→类型）,P0,todo,,类型修正被记住（域名→类型）,表 domain_type_rules 存在，但只在 migrate.py 表清单里，无任何读写代码
-21,E-19,工程,R6,中文分词与二字词兜底,工程,todo,,随 E-18,—
-22,M6-01,需求,R6,关键词搜索：标题/正文/摘要/标签/OCR,P0,todo,,关键词搜五路字段,worker index 步未实现
-23,M6-02,需求,R6,中文分词多词匹配，按覆盖度排序,P0,todo,M6-01,中文分词多词匹配按覆盖度排序,未实现
-24,M6-03,需求,R6,二字中文词兜底检索,P0,todo,M6-01,二字中文词兜底检索,未实现
+21,E-19,工程,R6,中文分词与二字词兜底,工程,done,,随 E-18,kb/search/query.py + Charabia 真机验证 0.98-1.0
+22,M6-01,需求,R6,关键词搜索：标题/正文/摘要/标签/OCR,P0,done,,关键词搜五路字段,六字段索引 + 真机五路命中（summary/ocr/tags/author/正文）
+23,M6-02,需求,R6,中文分词多词匹配，按覆盖度排序,P0,done,M6-01,中文分词多词匹配按覆盖度排序,searchableAttributes 顺序 + words 排序，真机 0.976
+24,M6-03,需求,R6,二字中文词兜底检索,P0,done,M6-01,二字中文词兜底检索,二字词真机 0.98-0.997，MIN_SCORE=0.30 实测标定
 25,M6-04,需求,R6,分类内搜索,P1,todo,M6-01,分类内搜索,P1，未实现
-26,M6-05,需求,R6,筛选器组合：类型×标签×时间×状态,P0,todo,M6-01,筛选器组合 类型×标签×时间×状态,未实现
+26,M6-05,需求,R6,筛选器组合：类型×标签×时间×状态,P0,done,M6-01,筛选器组合 类型×标签×时间×状态,filterableAttributes + 真机 kind/tags/时间/组合全通
 27,M6-06,需求,R6,语义搜索（记意思不记词）,P1,todo,,语义搜索,P1，未实现
 28,M6-07,需求,R6,搜索词高亮 + 命中位置跳转,P1,todo,,搜索词高亮+命中跳转,P1，未实现
 29,M6-08,需求,R6,搜索历史，常搜词固化成筛子,P2,todo,,搜索历史/常搜词固化,P2，未实现
@@ -71,9 +71,9 @@
 70,M4-01,需求,R8M,元数据存云数据库,P0,done,,元数据存云数据库,kb/store/items.py + Postgres
 71,M4-02,需求,R8M,封面/图片/文件存对象存储,P0,done,,封面/图片/文件存对象存储,R8 完成，KB_MEDIA_ROOT
 72,M4-06,需求,R8M,失败任务自动重试上限 3 次,P0,done,,失败任务自动重试上限 3 次,jobs.py 有 attempts+1>=3 才 failed + run_after 退避
-73,E-17,工程,R8M,ASR（Whisper 转录）代码,工程,todo,,kb/asr/ 已有 decode+segment，未接 worker,kb/asr/
-74,E-18,工程,R6,检索层（Meilisearch + index 步）,工程,todo,E-17,index 步未实现，loop.py 领到退回 pending,kb/worker/loop.py:32
-75,E-20,工程,R6,/api/search 端点,工程,todo,E-18,未实现,—
+73,E-17,工程,R8M,ASR（Whisper 转录）代码,工程,todo,,kb/asr/ 已有 decode+segment，未接 worker,kb/asr/ 有 decode+segment，未接 worker 未验
+74,E-18,工程,R6,检索层（Meilisearch + index 步）,工程,done,E-17,index 步未实现，loop.py 领到退回 pending,kb/search/ + kb/store/search.py + kb/worker/steps.py run_index
+75,E-20,工程,R6,/api/search 端点,工程,done,E-18,未实现,kb/api/search.py + GET /api/search 真机 curl 通过
 76,M2-02,需求,R8M,正文抽取：去广告去导航只留正文,P0,todo,,正文只原样落 content_text，没做 trafilatura 净化，未达「去广告」要求,⚠️只落 content_text，无 trafilatura 净化
 77,M2-05,需求,R8M,视频抓字幕（B站/YouTube）,P1,todo,,视频抓字幕（B站/YouTube）,kb/asr/ 无字幕抓取
 78,M3-06,需求,R5,视频章节化摘要带时间戳,P2,todo,M2-05,视频章节化摘要带时间戳,P2；kb/vision 能抽帧但未接 AI

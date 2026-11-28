@@ -104,6 +104,26 @@ def staged_stats() -> tuple[int, int]:
     return files, lines
 
 
+def staged_paths() -> list[str]:
+    """暂存区里的文件路径（相对仓库根），路径统一用 `/` 分隔。
+
+    给「改了代码却没更新任务表」用：它只需要知道「这次提交动了哪些文件」。
+
+    ## 为什么用 `-z` 而不是 `--name-only`
+
+    `git diff --name-only` 默认把非 ASCII 路径转成八进制转义：
+    `任务总表-2026-11-28.csv` 会输出成 `"\\344\\273\\277..."`。
+    本项目的任务表**文件名就是中文**，于是「改了表格」永远匹配不上，
+    钩子会把每一次带表格的提交都判成「没更新表格」而拒绝——
+    2026-11-28 它拦住了自己的提交，才发现这个坑。
+
+    `-z` 让 git 输出原始字节并以 NUL 分隔，不转义。另一个办法是
+    设 `core.quotepath=false`，但那是改用户的 git 配置，不该由检查器去动。
+    """
+    out = _git("diff", "--cached", "--name-only", "-z")
+    return [item.replace("\\", "/") for item in out.split("\0") if item.strip()]
+
+
 def check_commit_size(files: int, lines: int) -> list[Problem]:
     """一次提交塞太多东西，说明把多次改动攒成了一坨。"""
     if os.environ.get(BYPASS_ENV) == "1":

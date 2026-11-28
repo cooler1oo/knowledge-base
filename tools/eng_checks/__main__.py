@@ -14,7 +14,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import arch, git_rules
+from . import arch, git_rules, task_table
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -41,6 +41,16 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument(
         "--all", action="store_true", help="交付前自检：架构 + 干净 + 已推送"
     )
+    g.add_argument(
+        "--task-table",
+        action="store_true",
+        help="任务总表与代码事实一致性（② ③ + 提交前钩子）",
+    )
+    g.add_argument(
+        "--next-task",
+        action="store_true",
+        help="按工程顺序列出接下来该做的 3 项（开工前必查）",
+    )
     args = ap.parse_args(argv)
 
     if args.arch:
@@ -52,10 +62,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.staged:
         files, lines = git_rules.staged_stats()
-        return _report(
-            git_rules.check_commit_size(files, lines),
-            f"提交大小（{files} 文件 / {lines} 行）",
-        )
+        staged_problems: list[object] = list(git_rules.check_commit_size(files, lines))
+        # 改了 kb/ 或 tools/ 却没动任务表 → 拦。
+        # 这条比 --task-table 更早生效：代码进 commit 的那一刻就查，
+        # 不用等下次跑 --all。2026-11-28 的事故就是把这条漏在了最后。
+        staged_problems += task_table.check_touched(ROOT, git_rules.staged_paths())
+        return _report(staged_problems, f"提交大小（{files} 文件 / {lines} 行）")
 
     if args.pre_push:
         return _report(
@@ -63,9 +75,24 @@ def main(argv: list[str] | None = None) -> int:
             "推送前工作区",
         )
 
+    if args.task_table:
+        return _report(task_table.check(ROOT), "任务总表一致性")
+
+    if args.next_task:
+        rows = task_table.next_task(ROOT)
+        if not rows:
+            print("[eng-checks] 任务总表：没有可做的 todo（或全部被依赖阻塞）")
+            return 0
+        print("[eng-checks] 按工程顺序，接下来该做：")
+        for index, row in enumerate(rows, start=1):
+            mark = "← 建议先做这个" if index == 1 else ""
+            print(f"  {row.code:8} {row.task}  {mark}")
+        return 0
+
     # --all：任何一项红就算没做完
     problems: list[object] = []
     problems += arch.scan(ROOT)
+    problems += task_table.check(ROOT)
     problems += git_rules.check_worktree_clean()
     problems += git_rules.check_git_proxy()
     problems += git_rules.check_pushed()
