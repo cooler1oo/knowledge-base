@@ -80,6 +80,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.next_task:
         rows = task_table.next_task(ROOT)
+        blocked = [
+            r
+            for r in task_table.load(ROOT / task_table.TABLE_NAME)
+            if r.state == task_table.STATE_TODO and "⏸" in r.note
+        ]
+        if blocked:
+            # 被外部条件阻塞的任务必须显式列出。静默跳过会让读的人以为
+            # 它已经做完或被删了——2026-11-28 的 M3-05 就属于这种情况。
+            print("[eng-checks] 以下任务被外部条件阻塞，已跳过（优先级不降）：")
+            for row in blocked:
+                print(f"  {row.code:8} {row.task}")
+                print(f"           {row.note}")
+            print()
         if not rows:
             print("[eng-checks] 任务总表：没有可做的 todo（或全部被依赖阻塞）")
             return 0

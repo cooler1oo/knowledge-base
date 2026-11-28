@@ -223,6 +223,36 @@ def test_next_task_excludes_explicitly_out_of_scope(tmp_path: Path) -> None:
     assert codes == ["M6-02"]
 
 
+def test_next_task_skips_blocked_task(tmp_path: Path) -> None:
+    """被外部条件阻塞（⏸）的任务跳过，但优先级不降。
+
+    真实场景：M3-05（P0 图片 OCR）卡在「没有视觉模型」，但顺序排第一。
+    不跳过的话 `--next-task` 每次都推荐它，整个施工停在那里。
+    """
+    table = _write(
+        tmp_path,
+        "1,M3-05,需求,R5,被阻塞的P0,P0,todo,,⏸ 等待视觉模型配置,-\n"
+        "2,M3-08,需求,R5,能做的P0,P0,todo,,,—\n",
+    )
+    codes = [r.code for r in task_table.next_task(tmp_path, table=table)]
+    assert codes == ["M3-08"], "被阻塞的 M3-05 应跳过"
+
+    # 但它仍在表里、仍是第一位、标记还在——阻塞不等于降级
+    blocked = next(r for r in task_table.load(table) if r.code == "M3-05")
+    assert blocked.order == 1
+    assert "⏸" in blocked.note
+
+
+def test_blocked_marker_is_not_confused_with_normal_note(tmp_path: Path) -> None:
+    """普通说明文字不该被当成阻塞标记。"""
+    table = _write(
+        tmp_path,
+        "1,E-01,工程,R1,正常任务,工程,todo,,等待外部确认后开始,—\n",
+    )
+    codes = [r.code for r in task_table.next_task(tmp_path, table=table)]
+    assert codes == ["E-01"], "没有 ⏸ 标记的不该被跳过"
+
+
 # ── 真实表格 ──────────────────────────────────────────────────
 
 

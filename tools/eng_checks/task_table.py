@@ -236,9 +236,10 @@ def next_task(root: Path, *, table: Path | None = None) -> list[Row]:
     **这是「按顺序做」的正确形态**：做事前查一次，不是事后审计。
     历史顺序改不了，但下一次做哪个可以查询。
 
-    返回前 3 个 `todo`，按 `顺序` 升序。排除两类：
+    返回前 3 个 `todo`，按 `顺序` 升序。排除三类：
       - 依赖未完成的（`依赖` 列指向的行还是 todo）
       - 明确不做的（说明列含「明确不做」）
+      - **被外部条件阻塞的**（说明列含 ⏸）
 
     为什么返回 3 个而不是 1 个：只给 1 个时，若它被外部原因阻塞
     （等设备、等授权），执行者会卡住或自己找活干。给 3 个留出选择空间，
@@ -253,7 +254,7 @@ def next_task(root: Path, *, table: Path | None = None) -> list[Row]:
     for row in sorted(rows, key=lambda r: r.order):
         if row.state != STATE_TODO:
             continue
-        if _is_excluded(row):
+        if _is_excluded(row) or _is_blocked(row):
             continue
         deps = _deps_of(path, row)
         if any(by_code.get(d) and by_code[d].state != STATE_DONE for d in deps):
@@ -272,6 +273,23 @@ def _is_excluded(row: Row) -> bool:
     """
     text = f"{row.note} {row.evidence} {row.task}"
     return "明确不做" in text or "不做" in row.note
+
+
+#: 「暂时做不了」的标记。命中即跳过，但**不改变 P0 位置**——
+#: 任务的优先级是产品定的，不该因为它此刻被外部条件阻塞就降级。
+_BLOCKED_MARK = "⏸"
+
+
+def _is_blocked(row: Row) -> bool:
+    """外部条件未就绪（等模型、等设备、等授权）→ 进不了待办队列。
+
+    为什么必须有这条：2026-11-28 的 M3-05（P0 图片 OCR）卡在「没有视觉模型」，
+    但它顺序排第一，`--next-task` 每次都推荐它，整个施工就停在那里。
+    优先级不降（它仍是 P0），只是「现在做不了」，所以跳过并显示给用户看。
+
+    标记写在 `说明` 列，用 ⏸。选它是因为肉眼醒目、不会与正常文案混淆。
+    """
+    return _BLOCKED_MARK in row.note
 
 
 def _deps_of(path: Path, row: Row) -> tuple[str, ...]:
