@@ -18,8 +18,8 @@
 ## 加一个新版本
 
 ```bash
-# 1. 新建下一个编号（现有最大 0003 → 0004）
-touch kb/store/migrations/0004_add_xxx.sql
+# 1. 新建下一个编号（现有最大 0004 → 0005）
+touch kb/store/migrations/0005_add_xxx.sql
 # 2. 写完跑本地检查
 python -m pytest tests/test_migrate.py -q
 # 3. 应用到真库
