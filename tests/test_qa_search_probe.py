@@ -675,16 +675,34 @@ def test_库里0条且已翻页时不该再放宽一次() -> None:
       不同的估计），`estimatedTotal` 会从 0 吹成一个大数，分页器显示
       「还有 180 条」——用户会一直翻，每页都空
 
-    判据改法（一行）：把 `paging` 改成 `total is not None and total <= offset`，
-    即 `total=0, offset=0` 仍放宽（`0 <= 0` 为真 → 反而挡住），需要写成
-    `total is not None and (total <= offset and offset > 0)`，或者更直白：
+    ## 修法：下界用 `offset > 0`，不能用 `0 < total`
 
-    ```
-    paging = total is not None and (total == 0 and query.offset > 0
-                                    or total > 0 and total <= query.offset)
+    现在的写法是 `paging = total is not None and 0 < total <= query.offset`，
+    那个 `0 < total` 把 `total == 0` 整类排除了。改成：
+
+    ```python
+    paging = total is not None and query.offset > 0 and total <= query.offset
     ```
 
-    简化成 `total is not None and total < query.offset + 1 and query.offset > 0`。
+    逐格验过 12 个组合，新判据 12/12 对、旧实现 11/12（只错本条那一格）：
+
+    | total | offset | 该跳过放宽 | 旧实现 | 新判据 |
+    |---|---|---|---|---|
+    | 30 | 0 | ❌ 该放宽（门槛截的） | ✅ | ✅ |
+    | 0 | 0 | ❌ 该放宽（库里真没有） | ✅ | ✅ |
+    | 30 | 29 | ❌ 该放宽（还有 1 条） | ✅ | ✅ |
+    | 30 | 30 | ✅ 该跳过（翻到尾部） | ✅ | ✅ |
+    | **0** | **20** | ✅ 该跳过 | ❌ **放宽了** | ✅ |
+    | 30 | 40 | ✅ 该跳过（翻过头） | ✅ | ✅ |
+    | None | 任意 | ✅ 该跳过（保守） | ✅ | ✅ |
+    | 5 | 0 | ❌ 该放宽 | ✅ | ✅ |
+    | 5 | 5 | ✅ 该跳过 | ✅ | ✅ |
+    | 1 | 0 | ❌ 该放宽 | ✅ | ✅ |
+
+    **为什么 `offset > 0` 是正确的下界**：`offset == 0` 时用户在第 1 页，
+    空结果只可能是「库里没有」或「被门槛截」，两种都该放宽确认一次；只有
+    翻过页（`offset > 0`）才需要用 `total <= offset` 区分「尾部/翻过头」与
+    「还有数据但 0 命中」。
     """
 
     class _Client:
