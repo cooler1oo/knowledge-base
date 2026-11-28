@@ -26,6 +26,14 @@ path_prefix = "kb/vision/"
 layer = "视觉层"
 modules = ["kb.store"]
 
+# 媒体层：出的是磁盘上的字节，落库由 worker 经 kb.store.attachments 做。
+# 与视觉层同构——**必须显式登记**，不登记时本层只剩「写库 SQL」与「直连驱动」
+# 两条规则生效，「import kb.store」这条会静默漏检。
+[[import_deny]]
+path_prefix = "kb/media/"
+layer = "媒体层"
+modules = ["kb.store"]
+
 # 谁都不许绕过 store 直连数据库驱动。api 层今天只 import kb.store.db.Pool，
 # 一旦有人图省事直接 import pg8000，store 这层边界就形同虚设。
 [[driver_deny]]

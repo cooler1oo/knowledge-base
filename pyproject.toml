@@ -33,6 +33,13 @@ dependencies = [
     # ModuleNotFoundError（本机已复现）。所以只能显式钉 headless 版，
     # 并保证没有任何包把 GUI 版带进来。
     "opencv-python-headless>=4.8",
+    # 媒体层的图片归一化压缩（PRD §5.5「统一压缩，单张 ≤ 200KB」）。
+    # **必须显式声明**：Pillow 当前是 parsehub 的传递依赖（本机实测 13.0.0），
+    # 换干净机器或 parsehub 升级后 `from PIL import Image` 就可能失败，表现为
+    # 「所有封面都存不下来」而抓取全部正常——与 httpx 记的是同一个教训。
+    # 不锁上界：`Image.open` / `save` / `thumbnail` 三个接口在 13 实测可用，
+    # 而 `encode.py` 的 Protocol 隔离让升级影响面只有一处。
+    "pillow>=13",
 ]
 
 [project.optional-dependencies]
@@ -60,6 +67,7 @@ packages = [
     "kb",
     "kb.ai",
     "kb.asr",
+    "kb.media",
     "kb.store",
     "kb.vision",
     "tools",
