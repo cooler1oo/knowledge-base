@@ -51,7 +51,7 @@
 50,E-44,工程,ENG,覆盖率底线 55%,工程,done,,当前 85%,pyproject.toml [tool.coverage.report]
 51,E-42,工程,DOC,技术方案 M2-03/M4-02 标记已实现,工程,done,,R8 轮补,docs/tech/2026-11-26-技术方案.md
 52,E-43,工程,DOC,每轮交接包（四项固定产出）,工程,done,,实测/偏离/已知坑/未完成,deliverables/construction/
-53,M4-03,需求,R8M,软删除 + 回收站，可恢复,P0,todo,,【进行中】T01 store 七函数、T02 API 五端点、T03 索引联动+清扫线程（run_index 的 doc is None 分支改为 delete_ids + purge.py 节拍线程）已完成；T04 探针与真库用例 未做。,
+53,M4-03,需求,R8M,软删除 + 回收站，可恢复,P0,done,,四个任务全部完成：T01 store 七函数（kb/store/items.py，按设计 §1.2 放 items.py 不新建 trash.py）；T02 API 五端点（kb/api/trash.py，含 team-lead 批准的 purge/清空两条）；T03 run_index 的 doc is None 分支改 delete_ids + kb/worker/purge.py 节拍线程（启动先跑一次）；T04 scripts/probe_trash.py 探针 + 17 条真库用例 + 技术方案 §8.1/§8.2 回写。真机验：判据 4（软删后索引真的没了）、判据 5（rebuild 孤儿 0）全过。已知缺口：purge 只删行不删 media_root 文件，本轮不做 GC（探针量化）。,kb/store/items.py; kb/api/trash.py; kb/api/app.py; kb/worker/purge.py; kb/worker/steps.py; scripts/probe_trash.py
 54,E-24,工程,R9,数据自动备份（restic）,工程,todo,,无配置,—
 55,E-25,工程,R9,备份可恢复演练,工程,todo,E-24,随 E-24,—
 56,M9-06,需求,R9,数据自动备份,P0,todo,E-24,数据自动备份,P0，无 restic 配置
