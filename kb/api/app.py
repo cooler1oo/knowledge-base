@@ -26,9 +26,11 @@ from kb.store import accounts
 from kb.store import items as items_store
 from kb.store.db import Pool
 
+from ..media import persist as media_persist
 from . import ai as ai_api
 from . import auth, health, pages
 from . import items as items_api
+from . import media as media_api
 
 PUBLIC_PATHS = frozenset(
     {"/login", "/api/auth/login", "/api/auth/bootstrap", "/api/health", "/favicon.ico"}
@@ -99,6 +101,12 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
                 accounts.purge_expired(conn)
         except Exception:  # noqa: BLE001 启动清理/登录页/会话查找按降级处理，见各分支注释
             pass  # 库还没就绪时不该阻止服务起来，健康检查会如实反映
+        # 清 `.incoming/` 里上次被 kill 时留下的 `.part`：它们与正式文件同目录，
+        # `stats()` 看不到，会悄悄吃掉磁盘。清理失败不阻止服务起来。
+        try:
+            media_persist.clean_incoming(cfg.media_root)
+        except Exception:  # noqa: BLE001 启动清理失败不影响服务可用性
+            pass
         yield
         pool.close_all()
 
@@ -197,6 +205,12 @@ def create_app(pool: Pool, config: AppConfig | None = None) -> Starlette:
         Route("/api/ai/usage", ai_api.usage(pool)),
         Route("/api/items", items_api.create_or_list(pool), methods=["POST", "GET"]),
         Route("/api/items/{item_id:int}", items_api.detail(pool)),
+        # 媒体读取（M2-03 / M7-01）。**路由必须写 `{key:path}`**：`storage_key`
+        # 按定义带一个 `/`（`ab/cdef….jpg`），写成 `{key}` 的正则是
+        # `^/api/media/(?P<key>[^/]+)$`，永远匹配不上——现象是「所有媒体都 404」，
+        # 容易误判成数据库没数据（Starlette 1.10.0 实测）。
+        # **刻意不加入 PUBLIC_PATHS**：同源 `<img>` 会自动带 Cookie，未登录 401。
+        Route("/api/media/{key:path}", media_api.file_response(pool, cfg.media_root)),
         Route("/api/auth/bootstrap", api_bootstrap, methods=["POST"]),
         Route("/api/auth/login", api_login, methods=["POST"]),
         Route("/api/auth/logout", api_logout, methods=["POST"]),
