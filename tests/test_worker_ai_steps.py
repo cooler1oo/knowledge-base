@@ -73,8 +73,9 @@ def test_run_once_的_ai_client_是第三个位置参数且默认None():
     加在 `extractor` 之前或改成必填，都会让那 11 处红。
 
     ⚠️ 断言的是**性质**（前三个参数是这三个、`ai_client` 默认 `None`），
-    不是「参数列表逐字等于这三个」。R8 在后面追加了可选参数 `media_stage`，
-    它不影响这条性质——但改成逐字相等会让它红，而那并不是本条要守的东西。
+    不是「参数列表逐字等于这三个」。R8 在后面追加了可选参数 `media_stage`、
+    R6 追加了 `indexer`，它们都不影响这条性质——但改成逐字相等会让它红，
+    而那并不是本条要守的东西。
     """
     import inspect
 
@@ -84,6 +85,20 @@ def test_run_once_的_ai_client_是第三个位置参数且默认None():
     # 后面追加的参数必须全部有默认值，否则现有调用会红
     for name, param in params[3:]:
         assert param.default is not inspect.Parameter.empty, f"{name} 没有默认值"
+
+
+def test_run_once_的_indexer在末尾且默认None_R6():
+    """R6 的装配件同样**加在最末且默认 `None`**。
+
+    默认 `None` 是必要的：现有 11 处 `run_once(pool, extractor)` 调用与
+    全部 `tests/test_worker_loop.py` 的用例都不该因为「worker 新增了索引
+    能力」就突然开始连 Meili。位置在最末是因为它只在 `run_index` 里用，
+    与 `media_stage` 并列，都属于「按步骤生效的可选装配件」。
+    """
+    import inspect
+
+    names = list(inspect.signature(loop.run_once).parameters)
+    assert names[-1] == "indexer", f"indexer 应在最后，实际参数表：{names}"
 
 
 def test_run_forever_的_ai_client_在on_tick之后且默认None():
@@ -108,14 +123,26 @@ def test_run_forever_的_ai_client_在on_tick之后且默认None():
         assert param.default is not inspect.Parameter.empty, f"{name} 没有默认值"
 
 
-def test_SUPPORTED_STEPS_是三个步骤_AI_07_AI_09():
-    assert set(loop.SUPPORTED_STEPS) == {"fetch", "summarize", "tag"}
+def test_SUPPORTED_STEPS_是四个步骤_AI_07_AI_09():
+    """R6 起 `index` 已实现，本包能执行的步骤是四个。
+
+    这条与 `test_ocr仍不在SUPPORTED_STEPS` 一起守「说得出口的才算支持」：
+    加进 `SUPPORTED_STEPS` 的步骤必须有真实实现，否则条目会显示「已完成」
+    而字段是空的（`AI-10` 的原始教训）。
+    """
+    assert set(loop.SUPPORTED_STEPS) == {"fetch", "summarize", "tag", "index"}
 
 
-def test_ocr与index仍不在SUPPORTED_STEPS_AI_10():
-    """AI-10：本轮不入队 `ocr` / `index`。它们仍走「尚未实现」分支。"""
+def test_ocr仍不在SUPPORTED_STEPS():
+    """`AI-10`：`ocr` 本轮仍未实现，领到就走「尚未实现」分支退回队列。
+
+    `index` 已随 R6 从这条里移出（见上一条用例）。`ocr` 留下是因为
+    `M3-05`（图片 OCR+描述）尚未实现——把它加进 `SUPPORTED_STEPS` 会让
+    `mark_failed` 在第 3 次把条目标成「处理失败」，而摘要其实已成功。
+    """
     assert "ocr" not in loop.SUPPORTED_STEPS
-    assert "index" not in loop.SUPPORTED_STEPS
+    # index 已实现，这条同时防止有人把它「改回去」
+    assert "index" in loop.SUPPORTED_STEPS
 
 
 # ── steps 的三个入口签名（§4.2.1）──────────────────────────────
@@ -471,14 +498,17 @@ def test_链接与纯文字两条同时跑都有摘要_C7():
     assert text_client.calls == 1, "纯文字条目没有调用 AI（只修了 AI-07）"
 
 
-# ── C4 / AI-10：不入队 ocr 与 index ──────────────────────────
+# ── C4 / AI-10 / R6：入队哪些步骤 ────────────────────────────
 
 
-def test_全程不出现ocr与index任务_C4_AI_10():
-    """AI-10：本轮只入队 `summarize` 与 `tag`。
+def test_全程不出现ocr任务_C4_AI_10():
+    """`AI-10`：`ocr` 仍未实现，任何路径都不得入队它。
 
-    这两个步骤没实现，入队会让 `mark_failed` 在第 3 次把每条内容标成
-    「处理失败」——「宁可少一个功能，不可谎报一个状态」。
+    入队会让 `mark_failed` 在第 3 次把每条内容标成「处理失败」——
+    「宁可少一个功能，不可谎报一个状态」。
+
+    `index` **已从这条里移出**（R6 起它实现了，而且必须入队，否则搜不到）。
+    见 `tests/test_worker_index_step.py::test_summarize成功后入队index`。
     """
     client = FakeSummarizer(
         [SummarizeOk(summary="这是一段足够长的中文摘要内容", tags=("健康",))]
@@ -492,20 +522,94 @@ def test_全程不出现ocr与index任务_C4_AI_10():
 
     steps_enqueued = {str(p.get("s")) for p in conn.params_of("insert into jobs")}
     assert "ocr" not in steps_enqueued
-    assert "index" not in steps_enqueued
 
 
-def test_tag成功后不入队index_AI_10():
-    """AI-10 的硬要求：`tag` 是**本轮终态**，成功后不入队任何后续步骤。"""
+def test_summarize成功后入队index_R6_设计4点4():
+    """设计 §4.4：`summarize` 成功时入队 `index`。
+
+    不入队的话，本轮实现的检索层永远搜不到新内容——`run_index` 没有任务可领。
+    这是 `T13` 端到端用例「存抖音 → … → 搜得到」里最关键的一环。
+    """
+    client = FakeSummarizer(
+        [SummarizeOk(summary="这是一段足够长的中文摘要内容", tags=("健康",))]
+    )
+    conn = _Conn(
+        [[[1, 7, "summarize", 0, "running"]]],
+        settings={"ai_base_url": "u", "ai_api_key": "k", "ai_model": "m"},
+        item=_item_row(title="标题", content_text="字" * 200),
+    )
+    _run(conn, ai_client=client)
+
+    steps_enqueued = {str(p.get("s")) for p in conn.params_of("insert into jobs")}
+    assert "index" in steps_enqueued, f"入队的步骤：{steps_enqueued}"
+
+
+def test_summarize跳过时也入队index_R6_设计4点4():
+    """设计 §4.4：跳过（`no_text` / `title_only`）**也是终态**，也要入队。
+
+    不入队的话纯文字空内容永远不进索引，用户搜不到他刚存进来的东西。
+    """
+    client = FakeSummarizer([SummarizeSkipped(reason="no_text")])
+    conn = _Conn(
+        [[[1, 7, "summarize", 0, "running"]]],
+        settings={"ai_base_url": "u", "ai_api_key": "k", "ai_model": "m"},
+        item=_item_row(title="", content_text="   "),
+    )
+    _run(conn, ai_client=client)
+
+    steps_enqueued = {str(p.get("s")) for p in conn.params_of("insert into jobs")}
+    assert "index" in steps_enqueued
+
+
+def test_tag成功后入队index_R6_设计4点4():
+    """设计 §4.4：`tag` 成功时入队 `index`。
+
+    标签是这一步才写进 `item_tags` 的，索引里的 `tags` 字段依赖它。
+    与 `summarize` 那次入队由 `jobs_pending_uniq` 塌成一条，
+    所以不会产生两条 `index` 任务（那条约束由 `items.create_item` 的
+    `on conflict ... do nothing` 与 `jobs.enqueue` 的同一个子句保证）。
+    """
     conn = _Conn(
         [[[1, 7, "tag", 0, "running"]]],
         item=_item_row(props='{"aiTags": ["健康"]}'),
     )
     _run(conn)
 
-    assert not conn.params_of("insert into jobs"), (
-        f"tag 成功后入队了东西：{conn.params_of('insert into jobs')}"
+    steps_enqueued = {str(p.get("s")) for p in conn.params_of("insert into jobs")}
+    assert steps_enqueued == {"index"}, f"tag 成功后应只入队 index：{steps_enqueued}"
+
+
+def test_fetch成功后不入队index_R6_设计4点4():
+    """设计 §4.4：`run_fetch` 成功**不入队 index**。
+
+    后续 `summarize` 一定会入队 `index`（成功或跳过都入），不重复。
+    在 fetch 处也入队一次会让索引写出「只有标题、没摘要没标签」的半成品文档，
+    而且那次写入紧接着会被 summarize 那次覆盖——多一次无收益的写。
+    """
+    conn = _Conn(
+        [[[1, 7, "fetch", 0, "running"]]],
+        item=_item_row(url="https://x.invalid/a", kind="link"),
     )
+    _run(conn)
+
+    steps_enqueued = {str(p.get("s")) for p in conn.params_of("insert into jobs")}
+    assert "index" not in steps_enqueued, f"fetch 处不该入队 index：{steps_enqueued}"
+
+
+def test_fetch失败时也不入队index_R6_设计4点4():
+    """设计 §4.4：`fetch` 失败 / 无链接可抓时**不入队**。
+
+    内容没抓到，索引里放一条只有分享文案的文档会让它凭文案被搜到、
+    点进去没内容。等重试成功再入队。
+    """
+    conn = _Conn(
+        [[[1, 7, "fetch", 0, "running"]]],
+        item=_item_row(url="https://x.invalid/a", kind="link"),
+    )
+    _run(conn, extractor=_Extractor(ok=False))
+
+    steps_enqueued = {str(p.get("s")) for p in conn.params_of("insert into jobs")}
+    assert "index" not in steps_enqueued
 
 
 def test_summarize成功后入队tag_AI_09():

@@ -604,7 +604,15 @@ def test_fetch失败时没有summarize任务_C2(conn):
 
 
 @pytest.mark.pg
-def test_全程不出现ocr与index_C4(conn):
+def test_全程不出现ocr_C4(conn):
+    """`AI-10`：`ocr` 本轮仍未实现，任何路径都不得入队它。
+
+    入队会让 `mark_failed` 在第 3 次把条目判成「处理失败」，而摘要其实成功了。
+
+    **`index` 已从这条断言里移出**（R6 起它实现了，而且必须入队——
+    否则 `/api/search` 永远返回空）。改成断言「index 必须存在」，
+    这样「有人把入队链路改回去」也会红。
+    """
     _config(conn)
     item_id = _new_item(conn, title="标题", content_text="字" * 200)
     _enqueue(conn, item_id, "summarize")
@@ -615,7 +623,7 @@ def test_全程不出现ocr与index_C4(conn):
 
     steps = {job["step"] for job in _jobs(conn, item_id)}
     assert "ocr" not in steps
-    assert "index" not in steps
+    assert "index" in steps, f"summarize/tag 都没入队 index，搜索永远搜不到：{steps}"
 
 
 @pytest.mark.pg
