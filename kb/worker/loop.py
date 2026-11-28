@@ -54,7 +54,7 @@ IDLE_SECONDS = 2.0
 
 
 def index_upstream(supported: Sequence[str] = SUPPORTED_STEPS) -> tuple[str, ...]:
-    """`INDEX_UPSTREAM` 与 `supported` 求交。
+    """`INDEX_UPSTREAM` 与 `supported` 求交，**并剔掉 `index` 自身**。
 
     **只有「本包真能执行」的步骤才可能永远不完成，才值得等。**
     `ocr` 未实现时它在交集里缺席，索引就不会为一个永远不会跑的任务
@@ -63,8 +63,26 @@ def index_upstream(supported: Sequence[str] = SUPPORTED_STEPS) -> tuple[str, ...
     参数默认值是 `SUPPORTED_STEPS`，但显式传入是本轮用例的做法：
     `index_upstream(("fetch", "summarize", "tag", "index", "ocr"))` 断言
     `ocr` 被算进来——那条守的是「将来加 ocr 不用记得改这里」。
+
+    ## 为什么显式剔掉 `index`，而不是「靠 `INDEX_UPSTREAM` 别写它」
+
+    `jobs.blocking_upstream` 的 SQL 里有 `id <> :j` 排除自身，所以**真库路径**
+    不会自阻塞（`test_blocking_upstream不把自己算成阻塞` 守着那一条）。
+    但**纯函数这一层没有任何保护**：将来有人把 `"index"` 加进 `INDEX_UPSTREAM`
+    （误以为「索引也依赖索引」很自然），交集就会包含 `index`，于是
+    `run_index` 领到自己的 job 后判定「等 index 完成」→ `defer 30 秒` →
+    再领到 → 再推迟。
+
+    代价不是一次失败，是**每条内容永远推迟**：`jobs_pending_uniq` 让同一步骤
+    只有一条任务，它会一直 pending 下去，搜索永远搜不到任何东西，而
+    `jobs.error` 里写的是一句自相矛盾的「已推迟：等待 index 完成」。
+
+    这类故障排查成本极高（现象是「搜索全空、但所有服务都健康、日志无异常」），
+    而防御成本是一行 `and`。所以不靠约定，靠代码。
     """
-    return tuple(step for step in INDEX_UPSTREAM if step in supported)
+    return tuple(
+        step for step in INDEX_UPSTREAM if step in supported and step != "index"
+    )
 
 
 def _db_now(conn: Any) -> datetime:

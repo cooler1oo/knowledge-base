@@ -239,6 +239,49 @@ def test_上游判定的soon阈值是90秒() -> None:
     assert UPSTREAM_WAIT_SEC == 30.0
 
 
+def test_index不在上游交集里_即使被误加进INDEX_UPSTREAM() -> None:
+    """`index_upstream` 必须剔掉 `index` 自身，**不依赖 `INDEX_UPSTREAM` 不写它**。
+
+    真库路径有 `blocking_upstream` 的 `id <> :j` 兜住（见
+    `test_blocking_upstream不把自己算成阻塞`），但纯函数这层没有。
+
+    若交集含 `index`，`run_index` 领到自己的 job 会判定「等 index 完成」→
+    `defer 30 秒` → 再领到 → 再推迟。`jobs_pending_uniq` 让同一步骤只有一条
+    任务，它会**永远 pending 下去**，搜索永远搜不到任何东西，
+    而 `jobs.error` 里写的是「已推迟：等待 index 完成」——一句自相矛盾的话。
+
+    现象是「搜索全空、但所有服务都健康、日志无异常」，排查成本极高。
+    这条用例直接调纯函数（不需要 DB、不需要 Meili），防护成本接近零。
+    """
+    # 模拟「有人把 index 误加进 INDEX_UPSTREAM」：直接对函数喂一个含 index 的
+    # 步骤集合。真实实现里 INDEX_UPSTREAM 不含 index，但防御不能靠这一点。
+    assert "index" not in loop.index_upstream(
+        ("fetch", "summarize", "tag", "index", "ocr")
+    ), "index 出现在自己的上游交集里 —— run_index 会无限推迟"
+
+    # 同时断言 INDEX_UPSTREAM 当前确实不含 index（改了要有人看到）
+    assert "index" not in loop.INDEX_UPSTREAM
+
+
+def test_index_upstream的防御是代码不是注释() -> None:
+    """断言**函数体**里有排除条件，不是只在 docstring 里写了句约定。
+
+    为什么读源码：`index_upstream` 的输出在当前 `INDEX_UPSTREAM` 常量下
+    本来就不含 `index`（常量里没写它），所以上一条用例即使实现漏了排除条件
+    也会绿。真正要守的是「将来常量变了，函数仍然对吗」——那只能看函数体。
+    """
+    import inspect
+
+    body = inspect.getsource(loop.index_upstream)
+    code = body.split('"""')
+    # 去掉 docstring（偶数下标是代码段）
+    executable = "".join(code[::2])
+    assert '"index"' in executable or "'index'" in executable, (
+        "index_upstream 的函数体里没有排除 index 的条件，"
+        "只在 docstring 里靠约定 —— 将来 INDEX_UPSTREAM 加上 index 就会自阻塞"
+    )
+
+
 # ── 装配件缺席 ────────────────────────────────────────────────
 
 
