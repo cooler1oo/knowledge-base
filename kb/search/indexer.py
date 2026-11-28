@@ -119,7 +119,12 @@ class Indexer:
 
     # ── 重建（设计 §7.2）─────────────────────────────────────
 
-    def rebuild(self, pages: Iterable[Sequence[IndexDoc]]) -> dict[str, int]:
+    def rebuild(
+        self,
+        pages: Iterable[Sequence[IndexDoc]],
+        *,
+        max_id: int | None = None,
+    ) -> dict[str, int]:
         """全量重建：**先写后删孤儿**，全程可搜。
 
         ## 为什么不是「先删索引再灌」
@@ -134,28 +139,24 @@ class Indexer:
         `pages` 是**惰性的**：调用方传一个生成器，每页一次 SQL。
         这样 5000 条内容的库不会一次性把全部文档堆在内存里。
 
-        ## ⚠️ `missing`：写作业静默失败的机器检查
+        ## ⚠️ `max_id`：并发写入的保护
 
-        `add_documents` 不等任务（设计 §4.1：写是异步队列，等它会把批量变成
-        秒级阻塞）。代价是**任务失败没人知道**——真机踩过一次：请求体包错一层，
-        HTTP 返回 202、`taskUid` 也拿到了，任务却在 Meili 里 `failed`，
-        现象是「搜索永远 0 条命中」。
+        `orphans = existing - seen` 有一个时序漏洞：rebuild 翻页遍历库的
+        几十秒里，若 worker 为一条**新入库**的内容写了索引，那条文档在
+        `existing` 里、不在任何 `page` 里 → 被当孤儿删掉。现象是「刚存的内容
+        rebuild 后从搜索里消失，库里还在」，而那条内容的 `index` job 已是
+        `done`，不会自动补。
 
-        所以收尾时比一次「应该有的 id」与「索引里真的有的 id」：
-        `missing = seen - existing` 非空就说明有写入没落地。这一次比对**顺带
-        完成**（`existing` 本来就要取来算孤儿），成本为零。
+        传 `max_id`（重建开始时 `select max(id) from items` 的快照）后，
+        只删 `id <= max_id` 的孤儿——重建期间新插入的条目 id 必然大于它，
+        天然免疫。
 
-        ## 对账前必须等最后那个写任务
+        `None` 表示不做这个保护（单测与「不与 worker 并发」的场景）。
 
-        **第一版没等，真机上第一遍跑就误报了 `missing: 1`。**
-
-        原因是写作业异步：`add_documents` 返回 202 时文档还在队列里，
-        紧接着 `index_document_ids` 读到的是「还没有这条」。这不是「写入失败」，
-        是「还没写完」。第二遍跑同一个库就好了（文档已落地），所以这个 bug
-        只在**新建索引后的第一次** rebuild 出现——最难复现的那种。
-
-        所以 `rebuild` 在取 `existing` 之前等 `self.last_write_task`：
-        它是唯一需要等任务的地方，热路径（`run_index`）仍然不等。
+        为什么 `max_id` 由调用方取而不是在这里查：`kb/search/` 不读库
+        （`layer_rules.toml` 的 `import_deny` 守着）。`kb/worker/rebuild.py`
+        在开始翻页前取一次。这也是为什么本参数是**可选**的——不知道快照的
+        调用方不该被强制构造一个假值。
         """
         seen: set[int] = set()
         written = 0
@@ -170,7 +171,13 @@ class Indexer:
         self.client.wait_task(self.last_write_task)
 
         existing = set(self.client.index_document_ids(self.index_uid))
-        orphans = sorted(existing - seen)
+        # 只删「快照范围内」的孤儿。`max_id` 之后的 id 是重建期间新插入的，
+        # 它们进 `existing` 是因为 worker 已经给它们写了索引——**不是孤儿**。
+        # 删掉它们的现象是「刚存的内容 rebuild 后从搜索里消失」，而那条内容的
+        # `index` job 已 done，不会自动补。
+        orphans = sorted(
+            doc_id for doc_id in existing - seen if max_id is None or doc_id <= max_id
+        )
         deleted = self.delete_ids(orphans)
         missing = sorted(seen - existing)
         if missing:

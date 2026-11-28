@@ -374,6 +374,55 @@ def test_重建统计的孤儿数是差集大小而不是删除请求数():
     assert result["deleted"] == 3
 
 
+def test_max_id保护重建期间新写入的文档不被当孤儿删() -> None:
+    """`max_id` 之后新写入的条目在 `existing` 里但不在分页里 —— **不是孤儿**。
+
+    ## 这个竞态的完整时序
+
+    ```
+    t0  rebuild 取 max_id = 50（库里最大 id）
+    t1  rebuild 翻页读 1..50，拿到 50 条文档
+    t2  worker 给一条新内容（id=99）写了索引  ← 并发发生在这里
+    t3  rebuild 取 existing = {1..50, 99}
+    t4  orphans = existing - seen = {99}  → 删掉！
+    ```
+
+    现象：用户刚存的内容 rebuild 后从搜索里消失，库里还在，而那条内容的
+    `index` job 已是 `done`，**不会自动补**。
+
+    传了 `max_id=50` 之后，`99 > 50` 不满足 `id <= max_id`，被排除。
+
+    不传 `max_id`（`None`）时保持原语义——那是 `tests/test_qa_search_probe.py`
+    的 `test_rebuild的孤儿判定是集合差而非库里回查_记录竞态风险` 钉住的
+    行为，两条用例不冲突：一条验「默认语义不变」，一条验「传了快照就有保护」。
+    """
+    # 索引里：本次分页读到的 1..3，加上重建期间新写入的 99
+    client = FakeClient(existing_ids=[1, 2, 3, 99])
+    result = Indexer(client).rebuild(  # type: ignore[arg-type]
+        [[_doc(1), _doc(2), _doc(3)]], max_id=3
+    )
+
+    assert 99 not in client.deleted[0] if client.deleted else True, (
+        f"新写入的 99 被当孤儿删了：{client.deleted}"
+    )
+    assert result["deleted"] == 0, f"不该删任何东西：{result}"
+    assert result["orphans"] == 0
+
+
+def test_不传max_id时保持原语义() -> None:
+    """`max_id=None` = 不做并发保护，孤儿的判定仍是纯差集。
+
+    这条与 `test_max_id保护重建期间新写入的文档不被当孤儿删` 互补：
+    前者验「保护生效」，这条验「没传时行为不变」——避免有人把保护写成无条件，
+    那会让真正该清的孤儿（软删条目）留一条删不掉。
+    """
+    client = FakeClient(existing_ids=[1, 2, 3, 99])
+    result = Indexer(client).rebuild([[_doc(1), _doc(2), _doc(3)]])  # type: ignore[arg-type]
+
+    assert client.deleted == [[99]], "不传 max_id 时应按纯差集删掉 99"
+    assert result["deleted"] == 1
+
+
 # ── 上游异常不被吞 ─────────────────────────────────────────────
 
 

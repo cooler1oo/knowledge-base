@@ -63,6 +63,31 @@ def _pages(conn: Any, page_size: int) -> Iterator[list[Any]]:
         after_id = page[-1].id
 
 
+def _max_item_id(conn: Any) -> int | None:
+    """重建开始时的 `max(items.id)` 快照。空库返回 `None`。
+
+    ## 为什么需要这个快照
+
+    `Indexer.rebuild` 算孤儿用 `existing - seen`。rebuild 翻页遍历库的几十秒里，
+    若 worker 为一条**新入库**的内容写了索引，那条文档在 `existing` 里、
+    不在任何 `page` 里 → 被当孤儿删掉。现象是「刚存的内容 rebuild 后从搜索里
+    消失，库里还在」，而那条内容的 `index` job 已是 `done`，不会自动补。
+
+    有了快照之后只删 `id <= max_id` 的孤儿——重建期间新插入的条目 id 必然
+    大于它，天然免疫。
+
+    ⚠️ 这是「尽力而为」的保护，不是事务隔离：若并发写入的**正文更新**发生在
+    已翻过的页上（id 小于 max_id 但内容变了），索引里会是旧内容，下一轮
+    rebuild 或该条内容的下次 `index` 会修正。要彻底消除竞态需要库级快照
+    （`repeatable read` 事务），代价远大于收益——个人库的 rebuild 是运维动作，
+    通常不与 worker 并发跑。
+    """
+    rows = conn.run("select max(id) from items")
+    if not rows or rows[0][0] is None:
+        return None
+    return int(str(rows[0][0]))
+
+
 def rebuild(
     pool: Pool, indexer: Indexer, *, page_size: int = PAGE_SIZE
 ) -> dict[str, int]:
@@ -70,9 +95,15 @@ def rebuild(
 
     `indexer.rebuild` 拿的是一个 `Iterable[Sequence[IndexDoc]]`——逐页消费，
     所以连接只在取页的那一刻被持有，中途不长期占用池里的连接。
+
+    **`max_id` 在翻页之前取**：那是「重建开始时库里最大 id」的快照，用于
+    保护并发写入的新内容（见 `_max_item_id` 的 docstring）。取在翻页之后
+    就失去意义了——那时新内容已经进库，会被当成「重建范围内的数据」。
     """
     with pool.connection() as conn:
-        return indexer.rebuild(_pages(conn, page_size))
+        max_id = _max_item_id(conn)
+        log.info("重建快照 max_id=%s（本次只清理 id <= 它的孤儿）", max_id)
+        return indexer.rebuild(_pages(conn, page_size), max_id=max_id)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
