@@ -111,10 +111,47 @@ def _imports(tree: ast.AST) -> list[tuple[int, str]]:
 
 
 def _strings(tree: ast.AST) -> list[tuple[int, str]]:
+    """收集所有字符串常量，**排除 docstring**。
+
+    ## 为什么要排除 docstring（2026-11-28 修）
+
+    原实现用 `ast.walk` 一视同仁，于是模块 docstring 里写一句
+    「本层不执行 delete from items，写库在 store 层」就会被判成**违规**
+    ——用文字解释规则，反而被规则拦住。
+
+    实测（`check_file("kb/media/x.py", src)`）：
+    - docstring 含 `delete from` → 违规 1 条（误报）
+    - 注释含 `delete from` → 0 条（本来就不算，注释不进 AST）
+    - 真 SQL 字符串 → 1 条（正确）
+
+    判别 docstring 靠 `ast.get_docstring(node, clean=False)` 的判定口径：
+    每个 `Module` / `ClassDef` / `FunctionDef` / `AsyncFunctionDef` 的
+    body 第一条若是 `Expr(Constant(str))`，它就是 docstring。
+
+    **不削弱检查**：非 docstring 的字符串仍然全查，真写 SQL 照样被抓。
+    """
+    skip: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            continue
+        body = getattr(node, "body", None)
+        if not body:
+            continue
+        first = body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            skip.add(id(first.value))
     return [
         (n.lineno, n.value)
         for n in ast.walk(tree)
-        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        if isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and id(n) not in skip
     ]
 
 

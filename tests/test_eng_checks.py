@@ -41,6 +41,43 @@ def test_bare_keyword_in_message_is_not_flagged():
     assert arch.check_file("kb/api/app.py", source) == []
 
 
+def test_docstring里提到写库SQL不算违规():
+    """用文字解释规则，不该被规则拦住。
+
+    2026-11-28 真踩过：`kb/media/` 的模块 docstring 写「本层不执行
+    delete from items，写库在 store 层」，被原实现判成违规——因为它用
+    `ast.walk` 收集所有字符串常量，docstring 也是字符串。
+
+    这条钉住「docstring 被排除」这个行为。注意三种位置都要过：
+    模块级、函数级、类级。
+    """
+    cases = [
+        '"""本层不执行 delete from items。"""\n',
+        'def f() -> None:\n    """不写 insert into items。"""\n',
+        'class A:\n    """不 drop table。"""\n',
+    ]
+    for source in cases:
+        assert arch.check_file("kb/media/x.py", source) == [], source
+
+
+def test_非docstring的字符串仍然要查():
+    """排除 docstring 不能削弱检查——真写 SQL 必须照抓。
+
+    这条是上一条的**反向断言**，缺了它，「什么都不查」也能让上一条绿。
+    """
+    source = 'x = "delete from items"\n'
+    problems = arch.check_file("kb/media/x.py", source)
+    assert [p.rule for p in problems] == ["只有 store 能写库"]
+
+
+def test_真SQL语句仍然要查():
+    """最核心的一条：真调用里的 SQL 字符串。"""
+    source = 'def f(conn):\n    conn.run("delete from items where id = 1")\n'
+    problems = arch.check_file("kb/media/x.py", source)
+    assert [p.rule for p in problems] == ["只有 store 能写库"]
+    assert problems[0].line == 2
+
+
 def test_extract_layer_must_not_import_store():
     source = "from kb.store.items import get_item\n"
     problems = arch.check_file("kb/extract/douyin.py", source)
