@@ -32,7 +32,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from datetime import datetime
 from datetime import time as dt_time
 from typing import Any
@@ -55,7 +55,10 @@ from kb.store import items as items_store
 from kb.store import search as search_store
 from kb.store.db import Pool
 
-Handler = Callable[[Request], Awaitable[Response]]
+#: 同步 handler。**不是 `Callable[[Request], Awaitable[Response]]`**——
+#: Starlette 对同步 handler 走线程池，对 `async def` 走事件循环。
+#: 这里必须是同步的，理由见 `handler` 的注释（P0 事件循环阻塞）。
+Handler = Callable[[Request], Response]
 
 #: 对外返回的条目字段。改这里等于改前端契约（与 `/api/items` 逐字对齐）。
 ITEM_FIELDS = (
@@ -282,7 +285,24 @@ def search(
             circuit=holder["circuit"],
         )
 
-    async def handler(request: Request) -> Response:
+    # ⚠️ **同步 `def`，不是 `async def`。**（QA 抓到的 P0）
+    #
+    # 这个 handler 里全是同步阻塞调用：`pool.connection()`、pg8000 查询、
+    # `MeiliClient.search()`（最长 `SEARCH_TIMEOUT_SEC` = 3 秒）。
+    # 写成 `async def` 就是在事件循环里做同步 IO——**整个 api 进程被自己的
+    # handler 占住**，`/api/health`、`/api/items`、`/api/media` 全部排队。
+    #
+    # 实测（平板）：Meili 慢 5.15 秒期间，只返回静态 JSON 的 `/api/health`
+    # 等了 4.85 秒。用户点一次搜索 → 封面图、详情页全卡住 → 再点 → 排队。
+    # 现象像「Meili 慢」，实际是 api 被自己的 handler 卡死。
+    #
+    # 改成同步 `def` 后 **Starlette 会自动把它放进线程池**（`anyio.to_thread`），
+    # 不占事件循环。这是框架原生行为，不需要自己调 `run_in_threadpool`
+    # （项目里也没有那个工具）。
+    #
+    # `request.query_params` 在同步 handler 里是安全的（纯属性访问）；
+    # 这个 handler 不读 body，所以没有 `await request.json()` 的问题。
+    def handler(request: Request) -> Response:
         # 校验 `kind` 要查 `item_kinds` 表，所以先开连接。
         # 连接只在这一个请求内持有：搜索是一次查询，不跨请求复用游标。
         with pool.connection() as conn:
