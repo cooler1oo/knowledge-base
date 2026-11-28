@@ -17,7 +17,7 @@
 16,M3-03,需求,R5,AI 打 1-3 个主题标签,P0,done,,AI 打 1-3 个主题标签,worker tag 步
 17,M3-04,需求,R5,AI 只从已有词表选，不自创,P0,done,,AI 只从已有词表选，不自创,prompts.py + validate.py
 18,M3-05,需求,R5,图片一次调用产出 OCR + 描述,P0,todo,,⏸ 等待视觉模型配置；代码可先写，done 需实测识别准确率,worker ocr 步未实现（loop.py 明写）
-19,M3-08,需求,R5,类型修正被记住（域名→类型）,P0,todo,,类型修正被记住（域名→类型）,表 domain_type_rules 存在，但只在 migrate.py 表清单里，无任何读写代码
+19,M3-08,需求,R5,类型修正被记住（域名→类型）,P0,todo,,【进行中 A 半】T01 store 读写 kb/store/domain_rules.py 已完成；T02 domain_of 已完成；T03 建内容套用规则、T04 PATCH 修正接口 未做。B 半（编辑界面）留待前端阶段 M5-07 覆盖。,kb/store/domain_rules.py; kb/extract/normalize.py
 20,E-34,工程,PX,设置页（可视化配置入口，泛框架）,P0,todo,,泛框架：统一承载 AI 配置、域名类型规则（M3-08）、标签/筛子管理的入口。具体界面结构、密钥存储、改配置是否需重启 worker 等细节留到该轮施工时完整设计，此处不定死。岔路待定：用现有手写 HTML 做，还是等 E-26 前端工程建好再做,—
 21,M3-07,需求,R5,跨内容自动关联,P2,todo,,P2；待明确关联依据（标签共现 / 语义相似 / 同源），先问清再做,P2，未实现
 22,E-19,工程,R6,中文分词与二字词兜底,工程,done,,随 E-18,kb/search/query.py + Charabia 真机验证 0.98-1.0

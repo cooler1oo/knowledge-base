@@ -322,3 +322,85 @@ def test_类型判定_什么都没有是_link():
     from kb.extract.normalize import decide_kind
 
     assert decide_kind(post_type="", media_roles=[], word_count=0) == "link"
+
+
+# ── domain_of（M3-08 T02）─────────────────────────────────────
+#
+# 它取的是「规则表的键」，所以判据是**精确**：只去 `www.`，不归约到二级域。
+# 这与 `router.py::_matches` 的后缀匹配刻意不同（那里问「该走哪条抓取路线」）。
+
+
+def test_domain_去掉www前缀():
+    from kb.extract.normalize import domain_of
+
+    assert domain_of("https://www.douyin.com/video/123") == "douyin.com"
+
+
+def test_domain_保留子域因为类型不同():
+    """`mp.weixin.qq.com` 必须原样保留。
+
+    公众号文章与微信主站是不同的内容形态。归约到 `qq.com` 的话，用户在
+    公众号上的一次类型修正会污染整个 qq.com（含 QQ 空间、腾讯新闻）。
+    """
+    from kb.extract.normalize import domain_of
+
+    assert domain_of("https://mp.weixin.qq.com/s/xxx") == "mp.weixin.qq.com"
+    assert domain_of("https://v.douyin.com/abc") == "v.douyin.com"
+
+
+def test_domain_大小写归一():
+    from kb.extract.normalize import domain_of
+
+    assert domain_of("http://WWW.DouYin.COM/x") == "douyin.com"
+
+
+def test_domain_去掉端口():
+    """端口不表达内容类型，留着会让「同站点换端口」变成两条规则。"""
+    from kb.extract.normalize import domain_of
+
+    assert domain_of("http://localhost:8000/x") == "localhost"
+    assert domain_of("https://example.com:443/p") == "example.com"
+
+
+def test_domain_去掉userinfo():
+    from kb.extract.normalize import domain_of
+
+    assert domain_of("https://user:pass@Example.com/p") == "example.com"
+
+
+def test_domain_两种协议都认():
+    """同一站点的内容类型不因协议而变。"""
+    from kb.extract.normalize import domain_of
+
+    assert domain_of("http://douyin.com/x") == "douyin.com"
+    assert domain_of("https://douyin.com/x") == "douyin.com"
+
+
+def test_domain_非http协议返回None():
+    """`file:` / `ftp:` 不是网页内容，没有「域名类型」这回事。"""
+    from kb.extract.normalize import domain_of
+
+    assert domain_of("ftp://x.com/a") is None
+    assert domain_of("file:///tmp/x") is None
+    assert domain_of("javascript:void(0)") is None
+
+
+def test_domain_非法输入返回None不抛():
+    """`domain_of` 的失败必须是 `None` 而不是异常。
+
+    调用链是「建内容 → 取域名 → 查规则」。取不到域名只是「没有规则可用」，
+    不该让一条普通的纯文字入库失败。
+    """
+    from kb.extract.normalize import domain_of
+
+    assert domain_of("") is None
+    assert domain_of("   ") is None
+    assert domain_of("not-a-url") is None
+    assert domain_of("http://[::1") is None  # 坏方括号让 urlsplit 抛 ValueError
+
+
+def test_domain_www之后为空时返回None():
+    """`http://www./x` 这种畸形输入：剥掉 `www.` 之后是空串。"""
+    from kb.extract.normalize import domain_of
+
+    assert domain_of("http://www./x") is None

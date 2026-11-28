@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 # 与 `item_kinds` 表登记的预设值对齐（技术方案 §6.2）
 KIND_VIDEO = "video"
@@ -202,6 +203,56 @@ def decide_kind(post_type: str, media_roles: list[str], word_count: int) -> str:
         return KIND_IMAGE
     # 上游给了已知类型但没媒体：信任它，别把一条视频说成 link
     return _POST_TYPE_TO_KIND.get(post_type, KIND_LINK)
+
+
+def domain_of(url: str) -> str | None:
+    """从 URL 取「规则表的键」。非法/空 URL 返回 `None`，**不抛**。
+
+    ## 保留子域，只去掉 `www.`
+
+    | 输入 | 输出 | 为什么 |
+    |---|---|---|
+    | `https://www.douyin.com/video/1` | `douyin.com` | `www` 是纯前缀，不表达任何区别 |
+    | `https://v.douyin.com/abc` | `v.douyin.com` | 短链子域 |
+    | `https://mp.weixin.qq.com/s/x` | `mp.weixin.qq.com` | **公众号与微信主站类型不同** |
+    | `https://github.com/a` | `github.com` | |
+
+    **只去掉 `www.` 而不做「归约到二级域」**：`mp.weixin.qq.com` 与
+    `weixin.qq.com` 是两种内容形态，人为归约会让他们共用一条规则——用户在
+    公众号上的一次修正会污染整个微信主站。同理 `v.douyin.com`（短链）
+    与 `douyin.com` 在规则表里分开是**可接受**的：用户若两个域都修正一次，
+    表里两行；若只修正一个，另一个按自动判定走。错误方向是「少记住一次」，
+    比「记住错的地方」轻。
+
+    这与 `kb/extract/router.py::_matches` 的后缀匹配**语义不同，不要合并**：
+    那里问「这条 URL 该走哪条抓取路线」（`v.douyin.com` 该走抖音解析器，
+    所以宽匹配是对的）；这里问「用户的规则挂在哪个键上」（必须精确）。
+
+    ## 去端口
+
+    `http://localhost:8000/x` → `localhost`。端口不表达内容类型，留着会让
+    「同一站点换了端口」变成两条规则。
+
+    ## 大小写与协议
+
+    主机名统一小写（DNS 本身大小写不敏感），`http` 与 `https` 都认
+    （同一站点的类型不因协议而变）。其它协议（`file:`、`ftp:`、`javascript:`）
+    返回 `None`——它们不是「网页内容」，没有「域名类型」这回事。
+    """
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        # urlsplit 对畸形 URL 抛 ValueError（如 `http://[::1` 的坏方括号）
+        return None
+    if parts.scheme.lower() not in {"http", "https"}:
+        return None
+    host = parts.hostname  # 已自动小写、已剥端口与 userinfo
+    if not host:
+        return None
+    if host.startswith("www."):
+        host = host[4:]
+    # `www.` 之后可能是空串（`http://www./x` 这种畸形输入）
+    return host or None
 
 
 def normalize_payload(payload: dict[str, Any]) -> ExtractResult:
