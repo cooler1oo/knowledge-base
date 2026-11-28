@@ -4,9 +4,9 @@
 
 - **不并发**。单人自用，一条一条做足够；并发会引入"两个 worker 抢同一条"的
   复杂度，而 `FOR UPDATE SKIP LOCKED` 只是为了将来真开多个实例时不出错。
-- **不在本文件实现具体步骤**。三个步骤（`fetch` / `summarize` / `tag`）的实现
-  在 `kb/worker/steps.py`。这里只做「领 → 判 → 分派 → 兜底」。
-  `ocr` / `index` 仍未实现，领到就标回 `pending` 并写明「尚未实现」——
+- **不在本文件实现具体步骤**。四个步骤（`fetch` / `summarize` / `tag` / `index`）
+  的实现都在 `kb/worker/steps.py`。这里只做「领 → 判 → 分派 → 兜底」。
+  `ocr` 仍未实现，领到就标回 `pending` 并写明「尚未实现」——
   标成 done 是谎报，条目会显示「已完成」但摘要标签全是空的。
 
 **分派必须在 URL 判空之前**（`AI-11`）：原实现是「判步骤是否支持 → 取 URL 判空
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Sequence
 from datetime import datetime
 from typing import Any, Callable
 
@@ -30,15 +30,41 @@ from kb.worker import ai_runtime, steps
 
 log = logging.getLogger(__name__)
 
-# 本包真正能执行的步骤。`ocr` / `index` 领到就退回队列（见模块 docstring）。
+# 本包真正能执行的步骤。
 #
-# `AI-10` 明说本轮**不把这两个步骤放进队列**：它们没实现，入队会让
-# `mark_failed` 在第 3 次把每条内容标成「处理失败」，而摘要其实已经成功了。
-# 这是「宁可少一个功能，不可谎报一个状态」的直接应用。
-SUPPORTED_STEPS = ("fetch", "summarize", "tag")
+# `index` 加进来是本轮（R6）的事：检索要能搜到，索引步必须真的跑。
+# `ocr` 仍不在里面——它没实现，入队会让 `mark_failed` 在第 3 次把每条内容
+# 标成「处理失败」，而摘要其实已经成功了。这是「宁可少一个功能，
+# 不可谎报一个状态」的直接应用。
+SUPPORTED_STEPS = ("fetch", "summarize", "tag", "index")
+
+#: index 的**潜在**上游。顺序即依赖顺序，仅供排障阅读。
+#:
+#: 为什么 `fetch` 留在集合里：纯文字条目（`url` 为空）的 `fetch` 会立即
+#: `mark_done` 且不入队 `summarize`；带链接的条目 `fetch` 失败时也不入队
+#: `summarize`。这两种情况下 `fetch` 仍是「可能没跑完」的上游。
+#:
+#: 为什么 `ocr` 也列在这里：它本轮的 `SUPPORTED_STEPS` 里没有，
+#: `index_upstream` 求交后会被剔掉。**这不是多余**——`ocr` 上线时只需把它
+#: 加进 `SUPPORTED_STEPS`，交集自动包含它，不用改第二处。
+INDEX_UPSTREAM = ("fetch", "ocr", "summarize", "tag")
 
 # 一轮没活干时的等待秒数。太短会空转刷日志，太长会让新任务等太久。
 IDLE_SECONDS = 2.0
+
+
+def index_upstream(supported: Sequence[str] = SUPPORTED_STEPS) -> tuple[str, ...]:
+    """`INDEX_UPSTREAM` 与 `supported` 求交。
+
+    **只有「本包真能执行」的步骤才可能永远不完成，才值得等。**
+    `ocr` 未实现时它在交集里缺席，索引就不会为一个永远不会跑的任务
+    白等 90 秒；`ocr` 上线后自动生效（设计 §4.3）。
+
+    参数默认值是 `SUPPORTED_STEPS`，但显式传入是本轮用例的做法：
+    `index_upstream(("fetch", "summarize", "tag", "index", "ocr"))` 断言
+    `ocr` 被算进来——那条守的是「将来加 ocr 不用记得改这里」。
+    """
+    return tuple(step for step in INDEX_UPSTREAM if step in supported)
 
 
 def _db_now(conn: Any) -> datetime:
@@ -88,6 +114,7 @@ def run_once(
     extractor: Callable[[str], Coroutine[Any, Any, ExtractOutcome]],
     ai_client: SummarizerPort | None = None,
     media_stage: Any = None,
+    indexer: Any = None,
 ) -> bool:
     """处理一条任务。做了事返回 True，队列空返回 False。
 
@@ -99,6 +126,11 @@ def run_once(
     `None` 表示「本轮不下载媒体」。默认 `None` 这条不是保守，是必要的——
     现有 11 处调用与全部 `tests/test_worker_loop.py` 的用例都不该因为
     「worker 新增了下载能力」就突然开始联网。
+
+    `indexer` 是本轮（R6）的第三个可选装配件，同样**加在最末且默认 `None`**：
+    `None` 表示「本进程不写索引」，此时 `run_index` 把 job 推迟并写明原因
+    （装配 bug），而不是假装写完。理由与 `media_stage` 完全相同——现有 11 处
+    调用不该因为「worker 新增了索引能力」就突然开始连 Meili。
 
     所有异常都在这里收掉：调用方（`run_forever`）的循环不能因为一条坏数据退出。
     唯一会往外抛的是「数据库本身连不上」——那种情况继续转也没意义。
@@ -145,8 +177,18 @@ def run_once(
                     # 所以「闸门读哪个月」与「记账写哪个月」永不脱节。
                     now=_db_now(conn),
                 )
-            else:  # step == "tag"
+            elif step == "tag":
                 steps.run_tag(conn, item_id, job_id)
+            else:  # step == "index"
+                steps.run_index(
+                    conn,
+                    item_id,
+                    job_id,
+                    indexer=indexer,
+                    # 上游集合在这里求交：`ocr` 未实现时它自动缺席，
+                    # `ocr` 上线后自动生效（设计 §4.3）。
+                    upstream=index_upstream(),
+                )
         except Exception as exc:  # noqa: BLE001 单条坏数据不能打死整个 worker
             reason = f"{type(exc).__name__}: {exc}"
             log.exception("步骤执行异常 item=%s job=%s step=%s", item_id, job_id, step)
@@ -161,6 +203,7 @@ def run_forever(
     on_tick: Callable[[], None] | None = None,
     ai_client: SummarizerPort | None = None,
     media_stage: Any = None,
+    indexer: Any = None,
 ) -> None:
     """一直跑。`on_tick` 每轮调一次，用来写心跳。
 
@@ -168,14 +211,14 @@ def run_forever(
     `idle_seconds`，而把 `ai_client` 插在 `extractor` 之后（第三个位置）会让
     `run_forever(pool, extractor, 2.0)` 这类写法把浮点数当客户端传进去。
 
-    `media_stage` 同样放最后：它在**语义上**是另一个可选装配件，
+    `media_stage` 与 `indexer` 同样放最后：它们在**语义上**是另外的可选装配件，
     与 `ai_client` 并列，都只影响对应步骤的行为。
 
     队列空时 sleep，不是忙等——忙等会把 CPU 占满且日志刷屏。
     """
     while True:
         try:
-            handled = run_once(pool, extractor, ai_client, media_stage)
+            handled = run_once(pool, extractor, ai_client, media_stage, indexer)
         except Exception:  # noqa: BLE001 数据库级异常记一笔再继续，不让进程退出
             log.exception("worker 单轮失败，2 秒后重试")
             handled = True  # 避免立刻进入 sleep=False 的紧循环

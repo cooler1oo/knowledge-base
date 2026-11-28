@@ -1,20 +1,34 @@
-"""三个步骤各自的分支：`run_fetch` / `run_summarize` / `run_tag`。
+"""四个步骤各自的分支：`run_fetch` / `run_summarize` / `run_tag` / `run_index`。
 
 **为什么从 `loop.py` 拆出来**（设计 §3.1）：`loop.py` 原本是「领 → 判 → 做 → 标」
 一体。加两个步骤后它会变成三个 if 分支塞在 60 行里。拆出来才能让
 「URL 判空只属于 `fetch`」在**结构上**成立——`AI-11` 的根因就是判空写在分派之前，
 对所有已支持的步骤一视同仁。
 
-三个入口的签名按 `§4.2.1` 定死，`ai_client` **只出现在 `run_summarize` 里**：
+四个入口的签名按 `§4.2.1` 定死，`ai_client` **只出现在 `run_summarize` 里**：
 
 ```python
 run_fetch(conn, item_id, job_id, *, extractor)
 run_summarize(conn, item_id, job_id, *, ai_client, runtime, now)
 run_tag(conn, item_id, job_id)
+run_index(conn, item_id, job_id, *, indexer, upstream)
 ```
 
 这是「11 处现有 `run_once` 调用一行都不用改」的机制：`run_fetch` 与 `run_tag`
 不接收 `ai_client`，所以 `ai_client=None` 对它们完全无影响。
+`indexer` 同理只在 `run_index` 里出现。
+
+## 入队链路（设计 §4.4）
+
+```
+入库 → fetch → summarize → tag → index
+         │         │          │
+         │         └─ 成功/跳过都入队 index
+         └─ 成功入队 summarize      成功入队 index
+```
+
+`enqueue` 的 `on conflict (item_id, step) where state in ('pending','running')
+do nothing` 让两处 `index` 入队塌成一条。
 """
 
 from __future__ import annotations
@@ -33,9 +47,17 @@ from kb.ai.outcomes import (
 )
 from kb.ai.validate import validate_tags
 from kb.media import persist, plan
+from kb.search.config import (
+    DEFER_MEILI_DOWN_SEC,
+    DEFER_MEILI_UNAUTHORIZED_SEC,
+    UPSTREAM_SOON_SEC,
+    UPSTREAM_WAIT_SEC,
+)
+from kb.search.models import MeiliRejected, MeiliUnauthorized, MeiliUnavailable
 from kb.store import attachments as attachments_store
 from kb.store import items as items_store
 from kb.store import jobs as jobs_store
+from kb.store import search as search_store
 from kb.store import tags as tags_store
 from kb.worker import ai_runtime
 
@@ -310,6 +332,12 @@ def run_summarize(
         # B15：正文标题都空 → 零次调用，写 summarySkipped='no_text' 并标 done
         items_store.mark_summary_skipped(conn, item_id, "no_text")
         jobs_store.mark_done(conn, job_id)
+        # 设计 §4.4：跳过也是终态，也要入队 index。
+        #
+        # 这条内容一个字都没有，凭文本搜不到它——但它必须出现在
+        # **浏览器模式**（空 `q`，按 `saved_at_ts` 倒序）里。不入队的话
+        # 用户刚存进来的条目在列表里看不到，界面显示「已完成」却是空的。
+        jobs_store.enqueue(conn, item_id, "index")
         log.info("跳过摘要 item=%s job=%s step=summarize basis=none", item_id, job_id)
         return
 
@@ -427,6 +455,9 @@ def _apply_summarize_outcome(
         items_store.set_ai_tags_raw(conn, item_id, outcome.tags)
         jobs_store.mark_done(conn, job_id)
         jobs_store.enqueue(conn, item_id, "tag")
+        # 设计 §4.4：`summarize` 成功后入队 `index`。
+        # 与 `tag` 成功后那次入队由 `jobs_pending_uniq` 塌成一条。
+        jobs_store.enqueue(conn, item_id, "index")
         log.info(
             "摘要完成 item=%s job=%s step=summarize basis=%s tags=%s",
             item_id,
@@ -439,6 +470,9 @@ def _apply_summarize_outcome(
     if isinstance(outcome, SummarizeSkipped):
         items_store.mark_summary_skipped(conn, item_id, outcome.reason)
         jobs_store.mark_done(conn, job_id)
+        # 设计 §4.4：**跳过也是终态**——这条内容的摘要不会再有。
+        # 不入队的话纯文字空内容永远不进索引，用户搜不到他刚存进来的东西。
+        jobs_store.enqueue(conn, item_id, "index")
         log.info(
             "摘要跳过 item=%s job=%s step=summarize reason=%s",
             item_id,
@@ -462,15 +496,16 @@ def _apply_summarize_outcome(
 
 
 def run_tag(conn: Conn, item_id: int, job_id: int) -> None:
-    """读 `props.aiTags` → 校验词表 → 整体替换 `item_tags` → 标 done。
+    """读 `props.aiTags` → 校验词表 → 整体替换 `item_tags` → 标 done → 入队 index。
 
     **不接受 `ai_client`**（设计 §4.2.1 的 C 路径）：`aiTags` 是 `summarize`
     那次调用已经带回来的，这一步全程不调模型。所以客户端缺席时它照常执行——
     若 defer 它，「已成功拿到的标签」会被挂起 30 分钟，而这期间
     `items.summary` 已经写好了，界面显示「有摘要但没标签」，用户无法理解原因。
 
-    **成功后不入队 `index`**（`AI-10`）：`index` 没实现，入队会让
-    `mark_failed` 在第 3 次把每条内容标成「处理失败」。
+    **成功后入队 `index`**（R6 起，设计 §4.4）：标签是这一步才写进
+    `item_tags` 的，索引里的 `tags` 字段依赖它。与 `summarize` 那次入队
+    由 `jobs_pending_uniq` 塌成一条，所以不会产生两条 `index` 任务。
     """
     raw = items_store.get_ai_tags_raw(conn, item_id)
     vocabulary = tags_store.vocabulary(conn)
@@ -480,10 +515,122 @@ def run_tag(conn: Conn, item_id: int, job_id: int) -> None:
     if validated.ambiguous:
         items_store.set_ai_tag_ambiguous(conn, item_id, True)
     jobs_store.mark_done(conn, job_id)
+    jobs_store.enqueue(conn, item_id, "index")
     log.info(
         "标签落库 item=%s job=%s step=tag tags=%s ambiguous=%s",
         item_id,
         job_id,
         len(validated.tag_ids),
         validated.ambiguous,
+    )
+
+
+# ── index ─────────────────────────────────────────────────────
+
+
+def run_index(
+    conn: Conn,
+    item_id: int,
+    job_id: int,
+    *,
+    indexer: Any = None,
+    upstream: tuple[str, ...] = (),
+) -> None:
+    """把一条内容写进检索索引。**失败分级是本步骤最重要的部分**（设计 §3.4）。
+
+    ## 五步顺序
+
+    1. 判上游阻塞（`jobs.blocking_upstream`）。有 → `defer 30 秒` + return。
+    2. `search_store.index_source_row` 读一条文档（items 行 + 标签名数组）。
+       返回 `None`（条目不存在或已软删）→ 标 done 什么都不写。
+    3. `indexer.upsert([doc])` → Meili 接收（**不等任务**）。
+    4. `jobs.mark_done`。
+
+    **第 1 步之后才读数据**：上一步若推迟，读出来的就是过期快照。
+    先判后读能保证写进索引的字段是最新的。
+
+    ## 失败分级（判据写死在设计 §10，违反会返工）
+
+    | 异常 | 处置 | 为什么 |
+    |---|---|---|
+    | `MeiliUnavailable` | `defer 60 秒`（不计 attempts） | 服务挂了不是这条内容的错，重试几次通常就好 |
+    | `MeiliUnauthorized` | `defer 600 秒` + error 含 `KB_MEILI_KEY` | 密钥填错是可修的配置问题。判死之后要手工改库才能恢复，且用户永远看不到「去改密钥」 |
+    | `MeiliRejected` | `mark_failed` | 请求体或索引设置写错了，重试 3 次也照样错。编程错误不该消耗用户的时间 |
+    | 其它异常 | 抛出去，由 `run_once` 收成 `mark_failed` | 未预期错误应留下 traceback |
+
+    **一律不用 `mark_failed` 处理「Meili 挂了」**：三次之后这条内容被标成
+    「处理失败」，用户会对一堆本来没事的条目点重试，而真因是服务没起。
+
+    ## `indexer is None` 时
+
+    defer 而不是 mark_done。`None` 意味着 `__main__.py` 漏传装配件——
+    那是装配 bug（与 `run_summarize` 的「AI 客户端未装配」同一类）。
+    写「已推迟：索引器未装配」才能让人看出是漏传参数而不是 Meili 的问题。
+    """
+    blocked = jobs_store.blocking_upstream(
+        conn,
+        item_id,
+        job_id,
+        steps=upstream,
+        soon_seconds=UPSTREAM_SOON_SEC,
+    )
+    if blocked is not None:
+        # 推迟不计次（`defer` 的 SQL 里不出现 attempts）。
+        # 上游正在跑时写索引会写出半成品；30 秒后上游的典型状态是已完成。
+        jobs_store.defer(
+            conn, job_id, UPSTREAM_WAIT_SEC, f"已推迟：等待 {blocked} 完成"
+        )
+        log.info("索引推迟 item=%s job=%s 等待 %s", item_id, job_id, blocked)
+        return
+
+    if indexer is None:
+        jobs_store.defer(
+            conn,
+            job_id,
+            UPSTREAM_WAIT_SEC,
+            "已推迟：索引器未装配（检查 worker 启动时是否传 indexer）",
+        )
+        log.warning("索引器未装配 item=%s job=%s", item_id, job_id)
+        return
+
+    doc = search_store.index_source_row(conn, item_id)
+    if doc is None:
+        # 条目不存在或已软删。**标 done 而不是 failed**：这不是错误，
+        # 是「这条内容不该在索引里」。rebuild 的差集会把它从索引里清掉。
+        jobs_store.mark_done(conn, job_id)
+        log.info("条目不存在或已删，跳过索引 item=%s job=%s", item_id, job_id)
+        return
+
+    try:
+        indexer.upsert([doc])
+    except MeiliUnauthorized as exc:
+        # 600 秒而不是判死：密钥填错是配置问题，改完配置就该恢复。
+        # error 里必须写 `KB_MEILI_KEY`，否则用户看到「索引服务拒绝访问」
+        # 还得自己猜是哪个配置。
+        jobs_store.defer(
+            conn,
+            job_id,
+            DEFER_MEILI_UNAUTHORIZED_SEC,
+            f"已推迟：索引服务拒绝访问，检查 KB_MEILI_KEY（{exc}）",
+        )
+        log.warning("索引服务拒绝访问 item=%s job=%s：%s", item_id, job_id, exc)
+        return
+    except MeiliUnavailable as exc:
+        jobs_store.defer(
+            conn,
+            job_id,
+            DEFER_MEILI_DOWN_SEC,
+            f"已推迟：索引服务不可达，稍后重试（{exc}）",
+        )
+        log.warning("索引服务不可达 item=%s job=%s：%s", item_id, job_id, exc)
+        return
+    except MeiliRejected as exc:
+        # 编程错误：请求体或索引设置写错。重试 3 次也照样错。
+        jobs_store.mark_failed(conn, job_id, f"索引服务拒绝了请求：{exc}")
+        log.error("索引请求被拒 item=%s job=%s：%s", item_id, job_id, exc)
+        return
+
+    jobs_store.mark_done(conn, job_id)
+    log.info(
+        "索引完成 item=%s job=%s step=index tags=%s", item_id, job_id, len(doc.tags)
     )
