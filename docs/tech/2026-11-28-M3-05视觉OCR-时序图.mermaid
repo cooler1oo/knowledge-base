@@ -1,0 +1,92 @@
+%% 个人知识库 · M3-05 视觉 OCR 时序图（fetch → ocr → index）
+%% 对应 docs/tech/2026-11-28-M3-05视觉OCR设计.md §4.4
+sequenceDiagram
+    autonumber
+    participant API as items_api
+    participant DB as Postgres
+    participant W as worker.loop
+    participant S as worker.steps
+    participant VI as worker.vision_io
+    participant AI as ai.client
+    participant TP as ai.transport
+    participant ME as Meilisearch
+
+    Note over API,ME: ① 入库与抓取（R5/R8 既有链路，本轮只加一处入队）
+    API->>DB: create_item → insert items + jobs(step='fetch')
+    W->>S: run_fetch(...)
+    S->>DB: apply_extract(ok=True)
+    S->>DB: plan → store_media → replace_for_item（写入 role='image' 行）
+    S->>DB: mark_done(fetch)
+    S->>DB: enqueue(summarize)
+    S->>DB: select id,storage_key,mime,size_bytes from attachments<br/>where item_id=:i and role='image' limit 1
+    alt 有 role='image' 附件
+        S->>DB: enqueue(ocr)
+    else 无（视频只有 cover / 媒体阶段未注入）
+        Note right of S: 不入队，避免一条永远 no_image 的 job
+    end
+
+    Note over W,ME: ② ocr：八步（设计 §3.11）
+    W->>S: run_ocr(conn, item_id, job_id, ai_client, vision, now)
+    S->>DB: settings 读 ai_base_url/api_key/model/price
+    alt 三键缺任一
+        S->>DB: defer(1800, "已推迟：AI 未配置（缺 …）")
+    else 配置齐备但装配件缺失
+        S->>DB: defer(1800, "已推迟：AI 客户端未装配 / 视觉装配件未装配")
+    else 正常
+        S->>DB: image_media_for_ocr(item_id)
+        alt 没有 role='image' 附件
+            S->>DB: mark_ocr_skipped('no_image') + mark_done
+            Note right of S: 不动 ocr_text，不入队 index
+        else 有附件
+            S->>VI: read_image(key, declared_bytes)
+            VI->>VI: is_valid_key → resolve 越界校验 → is_file → 读字节
+            alt 字节 > 400 KiB
+                VI->>VI: PillowEncoder.normalize(long_side=1600, max_bytes=400KiB)
+            end
+            VI-->>S: bytes
+            S->>DB: usage.read(month) + budget_cny
+            alt 已花 + 预估 ≥ 上限
+                S->>DB: defer_until(下月 1 日 00:05)
+            else 预算可达
+                S->>AI: describe_image(bytes, mime, hint=title)
+                AI->>AI: vision.data_url → base64（体积 ×1.33）
+                AI->>AI: vision.build_messages（content 数组：text + image_url）
+                AI->>AI: _guard_request（原图 ≤400KiB、JSON ≤1MiB）
+                AI->>TP: post(endpoint, headers, body, vision_config_copy)
+                Note right of TP: trust_env=False 写死在 HttpxTransport<br/>读 30 秒 / 总 45 秒
+                TP-->>AI: TransportResponse 或 TransportError
+                AI->>AI: _failure_of（截断→401→429→5xx→非200）
+                alt 状态码失败
+                    AI-->>S: ImageFailed(category, message, snippet)
+                    S->>DB: apply_failure → fail_hard / mark_failed_delayed / mark_failed
+                else 200
+                    AI->>AI: vision.parse_image_response（两字段独立校验）
+                    alt ImageOk
+                        AI-->>S: ImageOk(ocr, desc, usage, partial)
+                        S->>DB: record_usage（累加当月）
+                        S->>DB: apply_ocr（ocr_text 覆盖 + props.imageDescription 三态）
+                        S->>DB: mark_done(ocr)
+                        S->>DB: enqueue(index)
+                    else ImageSkipped
+                        AI-->>S: ImageSkipped('no_text')
+                        S->>DB: mark_ocr_skipped('no_text') + mark_done
+                    else ImageFailed
+                        AI-->>S: ImageFailed(...)
+                        S->>DB: apply_failure(...)
+                    end
+                end
+            end
+        end
+    end
+
+    Note over W,ME: ③ index：上游集合现在含 ocr
+    W->>S: run_index(..., upstream=index_upstream())
+    S->>DB: blocking_upstream(step in (fetch,ocr,summarize,tag))
+    alt ocr 正在跑或 90 秒内到期
+        S->>DB: defer(30, "已推迟：等待 ocr 完成")
+        Note right of S: 最多 2 次，累计 ≤90 秒（设计 §4.3）
+    else ocr 已 done / failed / 被 defer 到 30 分钟后
+        S->>DB: index_source_row(item_id)  ← select i.ocr_text，此时有值
+        S->>ME: add_documents(kb_items, [doc])（第 4 路 ocr_text 生效）
+        S->>DB: mark_done(index)
+    end

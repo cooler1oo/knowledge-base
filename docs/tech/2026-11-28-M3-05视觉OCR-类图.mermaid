@@ -1,0 +1,137 @@
+%% 个人知识库 · M3-05 视觉 OCR 类图
+%% 对应 docs/tech/2026-11-28-M3-05视觉OCR设计.md §3.1
+classDiagram
+    direction LR
+
+    class AiConfig {
+        +str base_url
+        +str api_key
+        +str model
+        +float timeout_read
+        +float timeout_total
+        +float vision_timeout_read
+        +float vision_timeout_total
+        +int vision_max_request_bytes
+        +estimate_cny(chars_in)
+        +vision_copy() AiConfig
+    }
+
+    class ImageOk {
+        +str ocr_text
+        +str description
+        +TokenUsage usage
+        +bool partial
+    }
+
+    class ImageSkipped {
+        +str reason
+    }
+
+    class ImageFailed {
+        +FailureCategory category
+        +str message
+        +int http_status
+        +float retry_after_sec
+        +str snippet
+    }
+
+    class FailureLike {
+        <<Protocol>>
+        +FailureCategory category
+        +str message
+        +int http_status
+        +float retry_after_sec
+        +str snippet
+    }
+
+    class VisionPort {
+        <<Protocol>>
+        +describe_image(image, mime, hint) ImageOutcome
+    }
+
+    class AiClient {
+        +AiConfig config
+        +Transport transport
+        +summarize(title, text, vocabulary) AiOutcome
+        +describe_image(image, mime, hint) ImageOutcome
+        -_vision_payload(messages)
+        -_guard_request(body, config) ImageFailed
+        -_failure_of(response, config) ImageFailed
+    }
+
+    class Transport {
+        <<Protocol>>
+        +post(url, headers, body, config) TransportResponse
+    }
+
+    class HttpxTransport {
+        +post(url, headers, body, config) TransportResponse
+    }
+
+    class VisionStage {
+        +Path media_root
+        +ImageEncoder encoder
+        +read_image(key, declared_bytes) bytes
+    }
+
+    class OcrSource {
+        +int id
+        +str storage_key
+        +str mime
+        +int size_bytes
+    }
+
+    class WorkerSteps {
+        +run_fetch(conn, item_id, job_id, extractor, media_stage)
+        +run_summarize(conn, item_id, job_id, ai_client, runtime, now)
+        +run_tag(conn, item_id, job_id)
+        +run_index(conn, item_id, job_id, indexer, upstream)
+        +run_ocr(conn, item_id, job_id, ai_client, vision, runtime, now)
+    }
+
+    class Loop {
+        +SUPPORTED_STEPS
+        +INDEX_UPSTREAM
+        +index_upstream(supported)
+        +run_once(pool, extractor, ai_client, media_stage, indexer, vision)
+    }
+
+    class ItemsStore {
+        +apply_ocr(conn, item_id, ocr_text, description)
+        +mark_ocr_skipped(conn, item_id, reason)
+    }
+
+    class AttachmentsStore {
+        +image_media_for_ocr(conn, item_id) OcrSource
+    }
+
+    class AiRuntime {
+        +load_config(conn) AiConfig
+        +check_budget(conn, config, now, chars_in) BudgetDecision
+        +record_usage(conn, config, usage, now)
+        +apply_failure(conn, job_id, failed) void
+    }
+
+    class VisionPure {
+        <<module ai.vision>>
+        +build_messages(hint, image_data_url)
+        +data_url(raw, mime) str
+        +parse_image_response(raw_text) ImageOutcome
+        +estimate_input_chars(hint) int
+    }
+
+    AiClient ..|> VisionPort : 实现
+    AiClient --> AiConfig : 持有
+    AiClient --> Transport : 注入
+    HttpxTransport ..|> Transport : 实现
+    AiClient ..> ImageOk
+    AiClient ..> ImageSkipped
+    AiClient ..> ImageFailed
+    AiClient ..> VisionPure : 拼消息与解析
+    ImageFailed ..|> FailureLike : 结构上满足
+    AiRuntime ..> FailureLike : 入参类型
+    WorkerSteps --> VisionPort : 只依赖协议
+    WorkerSteps --> VisionStage : 读字节
+    WorkerSteps ..> ItemsStore : 写 ocr_text
+    WorkerSteps ..> AttachmentsStore : 取图片行
+    Loop --> WorkerSteps : 按 step 分派
