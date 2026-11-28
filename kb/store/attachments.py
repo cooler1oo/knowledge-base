@@ -251,11 +251,15 @@ def primary_media_id(conn: pg8000.native.Connection, item_id: int) -> int | None
     `primary_media_id(conn, item_id, role="cover" if has_cover else "image")`。
     它有两个问题：
 
-    1. **调用方要知道库里有什么。** `has_cover` 通常取自 `result.stored`，
-       而 `replace_for_item` 可能因 role 不在白名单而过滤掉某些 blob。
-       两者不一致时传了 `'cover'` 却查到 `None`，卡片空白且没有报错。
-    2. **真值源分裂。** 库里实际写进什么由本函数附近的 SQL 决定，
-       让调用方在外面重新推一遍，等于同一件事算两次。
+    1. **真值源分裂（这是本质理由）。** 库里写进什么由本文件附近的 SQL 决定，
+       让调用方在外面重新推一遍，等于同一件事算两次。两处只要有一处改了，
+       另一处不会跟着改，而报错是没有的。
+    2. **`has_cover` 与库里实际写入的行可能不一致（这是防御，当前不触发）。**
+       它通常取自 `result.stored`，而 `replace_for_item` 会过滤掉 `role` 不在
+       `REPLACEABLE_ROLES` 里的 blob。**当前两边完全重合**（白名单是
+       `('cover','image')`，`plan.py` 只产这两个），所以今天不会触发。
+       但只要将来有人给 `plan.py` 加一个新 role 却忘了同步白名单，传了
+       `'cover'` 就会查到 `None` —— 卡片空白且没有报错。所以这个方向要守住。
 
     所以排序写死在这里：`cover` 优先，没有就取 `sort_order` 最小的 image。
     第三个键 `id` 兜底，保证「同 sort_order 的两行」也有确定结果。
