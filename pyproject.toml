@@ -17,6 +17,22 @@ dependencies = [
     # 锁 0.28 下界是因为 trust_env=False 与 Timeout(connect=, read=) 的签名
     # 在该版本实测过；不锁上界（1.x 未发布，锁上界会挡住升级）。
     "httpx>=0.28",
+    # 视觉链路（P2）。**必须是 0.6.6，不能升 0.7.x**：
+    # 0.7.0 起 METADATA 里 `Requires-Dist: opencv-python` 是无条件依赖
+    # （pip install --dry-run 实测 0.7.0/0.7.1/0.7.2/0.7.3 都拉 opencv-python 5.1.0.95），
+    # 而 GUI 版 opencv 在无桌面的 proot 容器里 import cv2 直接失败（需要 libxcb.so.1）。
+    # 0.6.6 把 opencv 放进 extras（opencv / opencv-headless），
+    # Requires-Dist 只剩 Click / numpy / platformdirs / tqdm，我们显式声明 headless 版。
+    # 0.6.6 顶层不 import click（实测 import scenedetect 后 sys.modules 里没有 click），
+    # tqdm 是 try/except 可选导入，缺了用 FakeTqdmObject 顶上。
+    "scenedetect>=0.6.6,<0.7",
+    # **不许装 opencv-python（GUI 版）**：与 headless 共用 site-packages/cv2/ 目录，
+    # 两者同时存在时 GUI 版覆盖 __init__（本机实测 getBuildInformation() 从
+    # GUI: NONE 变成 GUI: WIN32UI），此时 pip uninstall opencv-python 会把
+    # cv2/ 里的文件一起删掉，headless 版仍在 pip list 里但 import cv2 变成
+    # ModuleNotFoundError（本机已复现）。所以只能显式钉 headless 版，
+    # 并保证没有任何包把 GUI 版带进来。
+    "opencv-python-headless>=4.8",
 ]
 
 [project.optional-dependencies]
@@ -38,7 +54,17 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["kb", "kb.ai", "kb.asr", "kb.store", "tools", "tools.doc_checks"]
+# kb.vision 不登记时 `pip install -e .` 装出来的包缺这个目录：测试靠
+# pythonpath = ["."] 照跑得通，只有部署到平板后 `import kb.vision` 才失败。
+packages = [
+    "kb",
+    "kb.ai",
+    "kb.asr",
+    "kb.store",
+    "kb.vision",
+    "tools",
+    "tools.doc_checks",
+]
 
 [tool.setuptools.package-data]
 "kb.store" = ["migrations/*.sql", "migrations/README.md"]
