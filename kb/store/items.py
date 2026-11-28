@@ -371,6 +371,62 @@ def item_jobs(conn: pg8000.native.Connection, item_id: int) -> list[dict[str, ob
     return jobs.rows(conn, item_id)
 
 
+# ── 检索用：批量补处理状态 + 类型枚举真源（R6）──────────────────────
+
+
+def summaries_by_ids(
+    conn: pg8000.native.Connection, ids: list[int] | tuple[int, ...]
+) -> list[ItemSummary]:
+    """一次查询取回多条列表项（含 `status` 与 `read_status`）。
+
+    ## 为什么不是 N+1
+
+    `/api/search` 一次返回 20 条命中，逐条调 `get_item` 就是 20 次往返
+    （每次还要再查一次 `jobs.counts`，实际 40 次）。这里一条 SQL 完成。
+
+    ## 为什么查不回来的要跳过，而不是补个默认值
+
+    `ids` 里有的、库里没有的，说明**索引里有、库已删**（软删或物理删）。
+    设计 §3.7 明写：宁可少一条，也不给一个点进去 404 的卡片。
+    接口返回的条数少于传入的 ids 数就是这种情况，调用方据此自然跳过。
+
+    ## 空列表零查询
+
+    `where id = any(cast('{}' as bigint[]))` 在 PG 上是合法且返回空集的，
+    但发一次必然返回空的往返没有意义，而 rebuild / 空搜索会高频走到这里。
+    """
+    if not ids:
+        return []
+    # 参数名 `ids`，按数组传。`cast` 不能省：pg8000 把 list 当 `unknown` 发过去，
+    # `any(unknown)` 让 PG 推断不出元素类型并报
+    # `could not determine data type of parameter`。
+    # 外层套一层 `select * from (...)`：`_LIST_SQL` 自带 `order by` 与 `limit`，
+    # 不能直接把 `where` 追加到它的末尾（那样 `limit` 会变成子句顺序错误）。
+    inner = _LIST_SQL.replace("order by i.id desc", "").replace("limit :limit", "")
+    rows = conn.run(
+        f"select * from ({inner}) sub "
+        " where sub.id = any(cast(:ids as bigint[])) "
+        " order by sub.saved_at desc, sub.id desc",
+        ids=[int(i) for i in ids],
+    )
+    return [_summary_from_row(row) for row in rows]
+
+
+def known_kinds(conn: pg8000.native.Connection) -> tuple[str, ...]:
+    """全部合法类型，来自 `item_kinds` 表。
+
+    **不许硬编码类型枚举**（设计 §9 T04 判据）：`items.kind` 有外键指向这张表，
+    「合法类型有哪些」由数据决定。写成常量的话，用户在 `item_kinds` 里加一类
+    （迁移设计明确支持「加新形态 = 插一行」）后，`/api/search?kind=新类型`
+    会返 400「未知类型」——而库里明明有这类内容。
+
+    按 `sort_order, kind` 排序：与 `item_kinds` 的展示顺序一致，
+    报错消息里列出的候选值也就按同一个顺序显示。
+    """
+    rows = conn.run("select kind from item_kinds order by sort_order, kind")
+    return tuple(str(row[0]) for row in rows)
+
+
 # ── 抓取结果落库 ─────────────────────────────────────────────
 #
 # 参数为什么用扁平的结构化字段而不是直接收 `kb.extract.router.ExtractOutcome`：

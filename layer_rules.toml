@@ -34,6 +34,18 @@ path_prefix = "kb/media/"
 layer = "媒体层"
 modules = ["kb.store"]
 
+# 检索层：出的是「一条文档该长什么样」与「一次搜索该按什么规则算」。
+# 兜底 SQL 在 `kb/store/search.py`，由 api/worker 注入成可调用对象传进来。
+#
+# **必须显式登记**：不登记时本层只剩「写库 SQL」与「直连驱动」两条规则生效，
+# 「import kb.store」这条会静默漏检。而检索层恰好是最容易图省事直接查库的地方
+# ——`SearchService` 要拿到兜底结果，最直觉的写法就是 `from kb.store import search`。
+# 那条写法会让「纯逻辑层不碰数据库」这条边界当场失效，且不会有任何报错。
+[[import_deny]]
+path_prefix = "kb/search/"
+layer = "检索层"
+modules = ["kb.store"]
+
 # 谁都不许绕过 store 直连数据库驱动。api 层今天只 import kb.store.db.Pool，
 # 一旦有人图省事直接 import pg8000，store 这层边界就形同虚设。
 [[driver_deny]]

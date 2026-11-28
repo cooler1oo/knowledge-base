@@ -68,6 +68,10 @@ packages = [
     "kb.ai",
     "kb.asr",
     "kb.media",
+    # kb.search 与 kb.vision 记的是同一个教训：不登记时 `pip install -e .`
+    # 装出来的包缺这个目录，测试靠 pythonpath 照跑得通，只有部署到平板后
+    # `import kb.search` 才失败。
+    "kb.search",
     "kb.store",
     "kb.vision",
     "tools",

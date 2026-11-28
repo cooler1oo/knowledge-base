@@ -272,3 +272,71 @@ def mark_failed_delayed(
         e=error,
     )
     return str(rows[0][0]) if rows else "pending"
+
+
+# ── 上游阻塞判定（R6 检索：index 步的「难题二」）──────────────────────
+
+
+def blocking_upstream(
+    conn: pg8000.native.Connection,
+    item_id: int,
+    job_id: int,
+    *,
+    steps: tuple[str, ...],
+    soon_seconds: float,
+) -> str | None:
+    """返回第一个「会阻塞本步骤」的上游步骤名，没有则 `None`。
+
+    ## 三条判据，删掉任何一条都会出事
+
+    | 判据 | 没有它会怎样 |
+    |---|---|
+    | `id <> :j` | 自己当前是 `running`，会把自己判成阻塞上游，**无限推迟** |
+    | `state = 'running'` 也算阻塞 | 上游正在跑（抓取 10–20 秒、AI 调用 3–10 秒），此时索引会写出半成品 |
+    | `run_after <= now() + soon_seconds` | 见下 |
+
+    ## `soon_seconds` 是设计 §4.2 对 §6.4 的实质修正
+
+    `summarize` 在 AI 未配置时会 `defer 1800 秒`
+    （`ai_runtime.DEFER_SECONDS_NOT_CONFIGURED`），状态仍是 `pending`。
+    字面执行「任何 pending 上游都等」的话，索引要等它 30 分钟——
+    **新存进来的内容半小时内搜不到**，而这半小时里标题和正文其实已经在库里了。
+    用户对这一现象的唯一解释是「搜索坏了」。
+
+    改成「只等 `soon_seconds`（90 秒）内要到期的上游」之后：
+
+    - 正常流：`summarize` 与 `tag` 都是秒级到分钟级，落在窗口内 → 索引等它们
+      → 写出的文档字段是齐的。
+    - AI 未配置：`summarize` 的下次执行在 30 分钟后 → 索引立刻写出
+      title/content_text/kind/saved_at → 新内容秒级可搜；等 AI 配好、
+      `summarize` 与 `tag` 完成后再入队一次 `index`，upsert 补上 summary 与 tags。
+
+    代价是多一次写入（upsert 幂等，无正确性影响）。
+
+    ## ⚠️ 这里的 SQL 里**不出现 `run_after` 之外的时间措辞**
+
+    `interval '1 second' * :soon` 而不是 `interval '90 seconds'`：
+    `tests/test_worker_index_step.py` 用「语句里不出现 attempts」验证
+    「推迟不计次」，而 `recover_stale` 靠 `interval '15 minutes'` 被假连接识别。
+    参数化秒数避免三段不同类型的语句在假连接眼里撞成一条。
+    """
+    if not steps:
+        return None
+    rows = conn.run(
+        "select step from jobs"
+        " where item_id = :i"
+        "   and id <> :j"
+        "   and step = any(cast(:steps as text[]))"
+        "   and ( state = 'running'"
+        "         or (state = 'pending'"
+        "             and run_after <= now() + interval '1 second' * :soon) )"
+        " order by id"
+        " limit 1",
+        i=item_id,
+        j=job_id,
+        steps=list(steps),
+        soon=float(soon_seconds),
+    )
+    if not rows:
+        return None
+    return str(rows[0][0])
