@@ -61,7 +61,8 @@ sequenceDiagram
 
     A->>Q: normalize_query(q)
     Q-->>A: 规范化文本（上限 64 字符）
-    A->>A: 校验 kind 走 known_kinds、status 走 READ_STATUSES，from/to 转 epoch 秒
+    A->>A: 校验 kind 走 known_kinds、status 走 READ_STATUSES
+    A->>A: from/to 按 config.DISPLAY_TZ（Asia/Shanghai）转 epoch 秒，to 取次日零点且用小于号
     A->>Q: build_filter(SearchFilter)
     Q-->>A: filter 表达式字符串
     A->>SV: run(SearchQuery)
