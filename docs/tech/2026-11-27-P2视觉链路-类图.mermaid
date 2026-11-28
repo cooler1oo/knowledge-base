@@ -1,0 +1,121 @@
+classDiagram
+    direction LR
+
+    class ScanPlan {
+        <<frozen dataclass>>
+        +int frame_skip
+        +float scan_sec
+        +bool truncated
+    }
+
+    class Shot {
+        <<frozen dataclass>>
+        +int index
+        +float start_sec
+        +float end_sec
+        +bool partial
+        +float duration_sec
+    }
+
+    class FramePick {
+        <<frozen dataclass>>
+        +int shot_index
+        +float at_sec
+        +float start_sec
+        +float end_sec
+    }
+
+    class VideoMeta {
+        <<frozen dataclass>>
+        +str path
+        +int width
+        +int height
+        +float duration_sec
+        +float fps
+    }
+
+    class FrameImage {
+        <<frozen dataclass>>
+        +object data
+        +int width
+        +int height
+        +float mean_luma
+        +float std_luma
+    }
+
+    class ExtractedFrame {
+        <<frozen dataclass>>
+        +int shot_index
+        +float at_sec
+        +float start_sec
+        +float end_sec
+        +str path
+        +int width
+        +int height
+        +int size_bytes
+    }
+
+    class SkippedFrame {
+        <<frozen dataclass>>
+        +int shot_index
+        +float at_sec
+        +str reason
+    }
+
+    class FrameSet {
+        <<frozen dataclass>>
+        +tuple~ExtractedFrame~ frames
+        +tuple~Shot~ shots
+        +VideoMeta meta
+        +ScanPlan scan
+        +str work_dir
+        +tuple~SkippedFrame~ skipped
+        +int count
+        +paths() tuple
+    }
+
+    class ShotCutter {
+        <<Protocol>>
+        +detect(video_path, plan, min_shot_sec) tuple
+    }
+
+    class FrameGrabber {
+        <<Protocol>>
+        +probe(video_path) VideoMeta
+        +open(video_path) None
+        +read_at(at_sec) FrameImage
+        +encode(image, long_side, quality) bytes
+        +close() None
+    }
+
+    class SceneDetectCutter {
+        +float threshold
+        +detect(video_path, plan, min_shot_sec) tuple
+    }
+
+    class Cv2Grabber {
+        +probe(video_path) VideoMeta
+        +open(video_path) None
+        +read_at(at_sec) FrameImage
+        +encode(image, long_side, quality) bytes
+        +close() None
+    }
+
+    class VideoUnreadable {
+        <<exception>>
+        +str path
+        +str reason
+    }
+
+    ShotCutter <|.. SceneDetectCutter : 方法内 import scenedetect
+    FrameGrabber <|.. Cv2Grabber : 方法内 import cv2
+    FrameSet o-- ExtractedFrame
+    FrameSet o-- SkippedFrame
+    FrameSet o-- Shot
+    FrameSet *-- VideoMeta
+    FrameSet *-- ScanPlan
+    ExtractedFrame ..> FramePick : 由它产出
+    FramePick ..> Shot : 指向
+    SceneDetectCutter ..> ScanPlan : 消费
+    FrameGrabber ..> FrameImage : 产出
+    FrameGrabber ..> VideoUnreadable : 打不开时抛

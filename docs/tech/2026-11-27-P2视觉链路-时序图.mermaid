@@ -1,0 +1,67 @@
+sequenceDiagram
+    autonumber
+    participant Caller as 调用方<br/>（probe_frames_vision.py / 将来的 worker 步骤）
+    participant Frames as frames.py<br/>extract_frames()
+    participant Plan as shot_plan.py<br/>plan_scan / merge_shots / plan_picks / is_blank
+    participant Cutter as ShotCutter<br/>（SceneDetectCutter）
+    participant Grab as FrameGrabber<br/>（Cv2Grabber）
+    participant Disk as work_dir（调用方传入）
+
+    Caller->>Frames: extract_frames(video, work_dir, max_frames=12, ...)
+    Frames->>Grab: probe(video)
+    alt 打不开（文件损坏 / 缺编解码 / 不是视频）
+        Grab-->>Frames: raise VideoUnreadable(path, reason)
+        Frames-->>Caller: raise VideoUnreadable（本层不降级，由调用方决定）
+    end
+    Grab-->>Frames: VideoMeta(path, width, height, duration_sec, fps)
+
+    Frames->>Plan: plan_scan(duration_sec, max_scan_sec)
+    alt duration_sec <= 0 或 fps <= 0（元信息不可信）
+        Plan-->>Frames: None
+        Frames-->>Caller: FrameSet(frames=(), shots=(), skipped=(), scan=None)
+    end
+    Plan-->>Frames: ScanPlan(frame_skip, scan_sec, truncated)
+
+    Frames->>Cutter: detect(video, plan, min_shot_sec)
+    Note over Cutter: 方法内 import scenedetect；<br/>ContentDetector(threshold=15.0, min_scene_len=int(fps*min_shot_sec))<br/>detect_scenes(video, duration=plan.scan_sec, frame_skip=plan.frame_skip)
+    alt 切分抛异常（视频损坏 / 解码中断）
+        Cutter-->>Frames: raise
+        Frames->>Frames: log.warning（带 scan_sec 与异常类型），raw_shots=()
+    else 成功
+        Cutter-->>Frames: tuple[Shot, ...]（0 个 = 扫描区间内无切点）
+    end
+
+    Frames->>Plan: merge_shots(raw, duration_sec, scan_sec, min_shot_sec)
+    Note over Plan: ① 裁掉越界区间 ② 按 start 排序 ③ 合并同 start<br/>④ 短于 min_shot_sec 的并进前一段<br/>⑤ raw 为空 → 补 (0, scan_sec) 单镜头<br/>⑥ truncated → 尾部补 (scan_sec, duration) 且标 partial
+    Plan-->>Frames: tuple[Shot, ...]（必然非空、必然从 0 开始）
+
+    Frames->>Plan: plan_picks(shots, max_frames)
+    Note over Plan: 时间轴等分 K = min(max_frames, 镜头数) 层；<br/>每层取「与该层重叠最长」的镜头，<br/>帧位取该镜头与本层交集的中点；<br/>最后按 at_sec 升序返回
+    Plan-->>Frames: tuple[FramePick, ...]
+
+    Frames->>Grab: open(video)
+    loop 每个 FramePick（at_sec 升序，seek 单调向前，实测 5.5 ms/帧）
+        Frames->>Grab: read_at(pick.at_sec)
+        alt 越界 / 解码失败
+            Grab-->>Frames: raise
+            Frames->>Frames: append SkippedFrame(reason="read_failed")
+        else 读到
+            Grab-->>Frames: FrameImage(data, width, height, mean_luma, std_luma)
+            Frames->>Plan: is_blank(std_luma)
+            alt std_luma < 2.0（全黑 / 纯色 / 纯白）
+                Frames->>Frames: append SkippedFrame(reason="blank")
+            else
+                Frames->>Grab: encode(image, long_side=1024, quality=85)
+                Grab-->>Frames: bytes
+                Frames->>Disk: 写 shot{index:03d}_{at:09.2f}s.jpg
+                Frames->>Frames: append ExtractedFrame
+            end
+        end
+    end
+    Frames->>Grab: close()
+
+    opt frames 为空
+        Frames->>Frames: 兜底：对 picks[0] 再来一次，仍失败就返回空 FrameSet
+    end
+    Frames-->>Caller: FrameSet(frames, shots, meta, scan, work_dir, skipped)
+    Note over Caller,Disk: 清理责任在调用方：<br/>要留档就保留 work_dir，不留就 shutil.rmtree(work_dir)
