@@ -1,0 +1,198 @@
+%% R6 检索层类图
+%% 对应 docs/tech/2026-11-28-R6检索设计.md §3
+%% 分层：kb/search/ 不 import kb.store；kb/store/search.py 不 import kb.search
+
+classDiagram
+    direction LR
+
+    class SearchMode {
+        <<enumeration>>
+        MEILI
+        FALLBACK
+        UNAVAILABLE
+    }
+
+    class IndexDoc {
+        +int id
+        +str title
+        +str summary
+        +list tags
+        +str ocr_text
+        +str content_text
+        +str author
+        +str kind
+        +str read_status
+        +str saved_at
+        +int saved_at_ts
+        +str source_domain
+        +to_meili_dict() dict
+    }
+
+    class SearchFilter {
+        +tuple kinds
+        +tuple tags
+        +tuple read_statuses
+        +int saved_from_ts
+        +int saved_to_ts
+        +is_empty() bool
+    }
+
+    class SearchQuery {
+        +str text
+        +int limit
+        +int offset
+        +SearchFilter filter
+        +float min_score
+    }
+
+    class SearchHit {
+        +int id
+        +str kind
+        +str title
+        +str summary
+        +tuple tags
+        +str source_domain
+        +str saved_at
+        +str read_status
+        +str status
+        +float ranking_score
+        +with_status() SearchHit
+    }
+
+    class SearchResult {
+        +SearchMode mode
+        +tuple hits
+        +bool relaxed
+        +str notice
+        +int estimated_total
+    }
+
+    class MeiliDown {
+        <<exception>>
+    }
+    class MeiliUnavailable {
+        <<exception>>
+    }
+    class MeiliUnauthorized {
+        <<exception>>
+    }
+    class MeiliRejected {
+        <<exception>>
+    }
+
+    class MeiliClient {
+        -str base_url
+        -str api_key
+        -float timeout_sec
+        -Any transport
+        +search() dict
+        +add_documents() int
+        +delete_documents() int
+        +patch_settings() int
+        +index_document_ids() list
+        +wait_task() None
+        -_request() dict
+    }
+
+    class Indexer {
+        -MeiliClient client
+        -str index_uid
+        +ensure_index() None
+        +upsert() int
+        +delete_ids() int
+        +rebuild() dict
+    }
+
+    class SearchService {
+        -MeiliClient client
+        -Callable fallback
+        -Callable clock
+        -float min_score
+        -float circuit_ttl_sec
+        -float down_until
+        +run() SearchResult
+        -_try_meili() SearchResult
+        -_try_fallback() SearchResult
+    }
+
+    class QueryModule {
+        <<module kb.search.query>>
+        +normalize_query() str
+        +build_terms() tuple
+        +build_filter() str
+        +quote() str
+    }
+
+    class ApiSearch {
+        <<module kb.api.search>>
+        +search() Handler
+        -_parse() SearchQuery
+        -_json_hit() dict
+    }
+
+    class StoreSearch {
+        <<module kb.store.search>>
+        +tuple READ_STATUSES
+        +fallback_search() list
+        +index_source_row() IndexDoc
+        +index_source_page() list
+    }
+
+    class JobsStore {
+        <<module kb.store.jobs>>
+        +enqueue() bool
+        +defer() None
+        +blocking_upstream() str
+        +mark_done() None
+    }
+
+    class ItemsStore {
+        <<module kb.store.items>>
+        +summaries_by_ids() list
+        +known_kinds() tuple
+    }
+
+    class WorkerSteps {
+        <<module kb.worker.steps>>
+        +run_fetch() None
+        +run_summarize() None
+        +run_tag() None
+        +run_index() None
+    }
+
+    class WorkerLoop {
+        <<module kb.worker.loop>>
+        +tuple SUPPORTED_STEPS
+        +index_upstream() tuple
+        +run_once() bool
+        +run_forever() None
+    }
+
+    WorkerLoop --> WorkerSteps : 分派
+    WorkerSteps --> JobsStore : 入队 / 推迟 / 标完成
+    WorkerSteps --> StoreSearch : 读装配数据
+    WorkerSteps --> Indexer : 写索引
+    WorkerLoop ..> Indexer : 注入
+
+    ApiSearch --> SearchService : 调用
+    ApiSearch --> ItemsStore : 批量补 status
+    ApiSearch ..> QueryModule : 复用 build_filter
+
+    SearchService --> MeiliClient : 主路径
+    SearchService --> QueryModule : 规范化
+    SearchService ..> StoreSearch : 经注入的 fallback 回调
+
+    Indexer --> MeiliClient : 协议
+
+    SearchResult *-- SearchMode
+    SearchResult *-- SearchHit
+    SearchQuery *-- SearchFilter
+    MeiliUnavailable --|> MeiliDown
+    MeiliUnauthorized --|> MeiliDown
+    MeiliRejected --|> MeiliDown
+    SearchService ..> MeiliDown : 捕获
+    MeiliClient ..> MeiliDown : 抛出
+
+    note for StoreSearch "只读：不改任何数据，不出现写库 SQL"
+    note for IndexDoc "字段与 DB 列同名 snake_case；camelCase 只在 API 层生成"
+    note for SearchService "fallback 是注入的可调用对象，因此本层不 import kb.store"

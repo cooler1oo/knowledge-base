@@ -1,0 +1,107 @@
+%% R6 检索计时序图
+%% 对应 docs/tech/2026-11-28-R6检索设计.md §4
+%% 图一（前半）：index 步从入队到写索引
+%% 图二（后半）：搜索请求从 API 到 Meili（含三级降级）
+
+sequenceDiagram
+    autonumber
+    participant W as worker 主循环 loop.py
+    participant S as 步骤 steps.py
+    participant J as jobs store
+    participant SS as store.search
+    participant IX as Indexer
+    participant C as MeiliClient
+    participant M as Meilisearch 7700
+    participant A as api.search
+    participant SV as SearchService
+    participant Q as query 纯函数
+    participant P as Postgres
+
+    Note over W,M: 图一 · index 步：入队 → 判上游 → 装配 → 写索引
+
+    S->>J: enqueue(item_id, "index")
+    Note right of J: on conflict (item_id,step) where state in (pending,running) do nothing，四处入队塌成一条
+
+    W->>J: claim_one()
+    J-->>W: id, itemId, step=index
+
+    W->>S: run_index(conn, item_id, job_id, indexer, supported)
+    S->>J: blocking_upstream(item_id, job_id, steps, soon_seconds=90)
+    Note right of J: steps = INDEX_UPSTREAM 与 supported 求交。判据：state=running，或 pending 且 run_after 在 90 秒内
+
+    alt 有阻塞上游
+        J-->>S: "summarize"
+        S->>J: defer(job_id, 30.0, "已推迟：等待 summarize 完成")
+        Note right of J: defer 的 SQL 里不出现 attempts，推迟不计次
+        S-->>W: return，30 秒后再领
+    else 无阻塞上游
+        J-->>S: None
+        S->>SS: index_source_row(conn, item_id)
+        SS-->>S: IndexDoc（items 行 + 标签名数组）
+        S->>IX: upsert([doc])
+        IX->>C: add_documents("kb_items", [doc_dict])
+        C->>M: POST /indexes/kb_items/documents
+        M-->>C: 202 taskUid
+        C-->>IX: taskUid
+        Note right of IX: 不等任务。写入是异步队列，等它会把一条内容占住 worker 数秒
+        IX-->>S: 1
+        S->>J: mark_done(job_id)
+    end
+
+    Note over C,S: index 步的三类异常分开处置
+
+    C-->>S: MeiliUnavailable（连接 / 超时 / 5xx / 坏 JSON）
+    S->>J: defer(job_id, 60.0, "索引服务不可达，稍后重试")
+    C-->>S: MeiliUnauthorized（401 / 403）
+    S->>J: defer(job_id, 600.0, "索引服务拒绝访问，检查 KB_MEILI_KEY")
+    C-->>S: MeiliRejected（400 / 422，编程错误）
+    S->>J: mark_failed(job_id, reason)
+
+    Note over A,P: 图二 · 搜索：API → SearchService → Meili 或 PG 兜底
+
+    A->>Q: normalize_query(q)
+    Q-->>A: 规范化文本（上限 64 字符）
+    A->>A: 校验 kind 走 known_kinds、status 走 READ_STATUSES，from/to 转 epoch 秒
+    A->>Q: build_filter(SearchFilter)
+    Q-->>A: filter 表达式字符串
+    A->>SV: run(SearchQuery)
+
+    alt 熔断冷却中（clock 小于 _down_until）
+        SV->>P: fallback(query) 即 fallback_search
+        P-->>SV: 命中列表（按 field_hits 排序）
+        SV-->>A: SearchResult(mode=FALLBACK, degraded=true, notice=人话)
+    else 正常路径
+        SV->>C: search("kb_items", q, filter, showRankingScore, rankingScoreThreshold)
+        C->>M: POST /indexes/kb_items/search
+        alt Meili 正常
+            M-->>C: 200 hits + estimatedTotalHits
+            C-->>SV: 响应体
+            opt 命中 0 条且 min_score 大于 0
+                SV->>C: search 同上，rankingScoreThreshold=0
+                C->>M: POST /indexes/kb_items/search
+                M-->>SV: hits
+                Note right of SV: 置 relaxed=True
+            end
+            SV-->>A: SearchResult(mode=MEILI, estimatedTotal 非空)
+        else MeiliUnavailable
+            C-->>SV: 抛 MeiliUnavailable
+            SV->>SV: _down_until = clock() + 30
+            SV->>P: fallback_search（ILIKE 五路）
+            alt 兜底成功（含 0 条）
+                P-->>SV: 命中列表
+                SV-->>A: SearchResult(mode=FALLBACK)
+            else 兜底也抛
+                P-->>SV: 异常
+                SV-->>A: SearchResult(mode=UNAVAILABLE)
+            end
+        else MeiliRejected（filter 语法错，我方 bug）
+            C-->>SV: 抛 MeiliRejected
+            SV-->>A: 继续抛，API 返 500，日志留 filter 串
+        end
+    end
+
+    A->>SS: summaries_by_ids(ids)，一次批量补 status 与 readStatus
+    SS->>P: select ... where id = any(...)
+    P-->>SS: 行
+    SS-->>A: 库里已删的 id 被跳过，不出空卡片
+    A-->>A: 序列化 camelCase，附 searchMode / degraded / notice / rankingScore
