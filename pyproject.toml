@@ -63,7 +63,10 @@ asyncio_default_fixture_loop_scope = "function"
 line-length = 88
 # 文档里的 Python 示例块不参与格式化：它们是说明书的一部分，
 # 手写对齐是为了可读性，ruff 自动改会破坏阅读顺序。
-extend-exclude = ["docs/**"]
+# deliverables/ 与 docs/ 性质相同，都是给人读的文档（交付记录、交接包），
+# 里面同样有 Python 示例块。2026-11-28 只排除 docs/ 时，一份交接文档
+# 里的示例块被 ruff format 改写，提交被拦下——漏的是目录，不是格式。
+extend-exclude = ["docs/**", "deliverables/**"]
 
 [tool.ruff.lint]
 # T20 = 禁 print。产品代码要用日志，print 只会进 stdout 没人收。
