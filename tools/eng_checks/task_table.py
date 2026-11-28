@@ -310,22 +310,51 @@ def _deps_of(path: Path, row: Row) -> tuple[str, ...]:
 
 
 def check_touched(root: Path, touched: list[str]) -> list[Violation]:
-    """改了 `kb/` 却没动表格 → 提交时拦截。
+    """改了 `kb/` 却「没有已完成的记账」→ 提交时拦截。
 
-    这条是判据 4。它不看内容对不对，只看「动了代码却没申报」。
-    比前三条更早生效：代码进 commit 的那一刻就查，而不是等下次跑 --all。
+    这条是判据 4。它比前三条更早生效：代码进 commit 的那一刻就查，
+    而不是等下次跑 `--all`。
+
+    ## 2026-11-28 修正：判据从「diff 里有没有表格」改成「记账是否自洽」
+
+    原实现只看 `touched` 里有没有 `任务总表-2026-11-28.csv`。这个判法在
+    **「一个需求分多笔提交」** 下必然误伤：第一笔提交后表格已入库，第二笔
+    起 `git add` 加不进任何 diff（没有变化），于是每一笔都要伪造一处表格
+    改动才能过钩子。工程师为此在说明列补赘字，还漏过一次记账。
+
+    「本次提交带了表格」从来不是目标。目标是 **表格与代码事实一致**，
+    而这件事 `check()` 已经在做（判据 1：`todo` 但证据文件已存在 → 报错）。
+    所以这里改成：**若当前表格存在不一致，就拦；一致则放行**，
+    与「这一笔碰没碰表格」无关。
+
+    代价：这一步会多读一次 CSV、多查几次文件是否存在（毫秒级）。
+    收益：分多笔提交一个需求时不再需要伪造 diff。
+
+    ## 为什么不干脆删掉这条
+
+    `check()` 只在跑 `--all` 或手动 `--task-table` 时生效，而 `--all` 是
+    交付前才跑。若删掉这条，中途每一笔提交都不会提醒「活干完了没记账」，
+    等于回到 2026-11-28 那次「R6 七个任务全做完、表格一行没标」的状态。
+    保留在提交时必须拦，只是判据换成「记账自洽」。
     """
     code_touched = [f for f in touched if f.startswith(("kb/", "tools/"))]
-    table_touched = any(Path(f).name == TABLE_NAME for f in touched)
-    if code_touched and not table_touched:
-        sample = ", ".join(code_touched[:3])
-        more = f" 等 {len(code_touched)} 个" if len(code_touched) > 3 else ""
-        return [
-            Violation(
-                0,
-                "改了代码没更新任务表",
-                f"本次提交改了 {sample}{more}，但没动 {TABLE_NAME}。"
-                f"完成任务后在表格里标 done、写完成过程记录，再提交。",
-            )
-        ]
-    return []
+    if not code_touched:
+        return []
+
+    # 记账自洽检查与「这一笔动了表格没有」无关，只看当前工作区状态。
+    problems = [p for p in check(root) if p.rule == "活干了没记账"]
+    if not problems:
+        return []
+
+    sample = ", ".join(code_touched[:3])
+    more = f" 等 {len(code_touched)} 个" if len(code_touched) > 3 else ""
+    first = problems[0]
+    return [
+        Violation(
+            first.line,
+            "改了代码但任务表还没记账",
+            f"本次提交改了 {sample}{more}。任务表里有活干完了却没标 done：\n"
+            f"    {first.message}\n"
+            f"  改表格的 done/证据两列即可（不要求与本笔提交同一文件）。",
+        )
+    ]

@@ -113,31 +113,42 @@ def test_done_with_evidence_is_fine(tmp_path: Path) -> None:
     assert task_table.check(tmp_path, table=table) == []
 
 
-# ── 判据 4：改了代码没动表 ─────────────────────────────────────
+# ── 判据 4：改了代码但记账不自洽 ───────────────────────────────
 
 
-def test_code_change_without_table_update_is_flagged() -> None:
-    """这条是提交前钩子的拦截点。
+def test_code_change_with_unaccounted_work_is_flagged(tmp_path: Path) -> None:
+    """改了代码、且表里有「活干完了没记账」→ 提交时拦。
 
-    2026-11-28 的事故就是这条缺失：代码提交了，表没动。
+    这是 2026-11-28 那次事故的核心：R6 七个任务全做完，表格一行没标。
     """
-    problems = task_table.check_touched(
-        Path("."), ["kb/search/service.py", "kb/api/search.py"]
-    )
-    assert [p.rule for p in problems] == ["改了代码没更新任务表"]
-    assert "kb/search/service.py" in problems[0].message
+    (tmp_path / "kb").mkdir()
+    (tmp_path / "kb" / "done.py").write_text("x = 1\n", encoding="utf-8")
+    _write(tmp_path, "1,E-01,工程,R1,做了没记,工程,todo,,说明,kb/done.py\n")
+
+    problems = task_table.check_touched(tmp_path, ["kb/done.py"])
+
+    assert [p.rule for p in problems] == ["改了代码但任务表还没记账"]
+    assert "kb/done.py" in problems[0].message
+    assert "E-01" in problems[0].message
 
 
-def test_code_change_with_table_update_is_fine() -> None:
-    """同一提交里带上表格，就不拦。"""
-    problems = task_table.check_touched(
-        Path("."), ["kb/search/service.py", task_table.TABLE_NAME]
-    )
-    assert problems == []
+def test_code_change_with_consistent_table_is_fine(tmp_path: Path) -> None:
+    """表与代码事实自洽时放行——**不看这一笔碰没碰表格**。
+
+    2026-11-28 修正：原实现要求「本笔暂存里必须有表格文件」，导致一个需求
+    分多笔提交时，第二笔起加不进任何表格 diff，只能伪造改动或漏记账。
+    现在判的是「记账是否自洽」，与提交粒度无关。
+    """
+    (tmp_path / "kb").mkdir()
+    (tmp_path / "kb" / "ok.py").write_text("x = 1\n", encoding="utf-8")
+    _write(tmp_path, "1,E-01,工程,R1,做完了,工程,done,,说明,kb/ok.py\n")
+
+    # 没带表格也放行：因为表已经和事实一致
+    assert task_table.check_touched(tmp_path, ["kb/ok.py"]) == []
 
 
 def test_doc_only_change_does_not_require_table() -> None:
-    """只改文档不要求动表格——否则每个文档提交都被拦，很快会被绕过。"""
+    """只改文档不触发这条——没有代码改动就没有记账义务。"""
     problems = task_table.check_touched(Path("."), ["docs/tech/方案.md", "README.md"])
     assert problems == []
 

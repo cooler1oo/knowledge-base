@@ -58,9 +58,18 @@ repos:
       # 本地不查、CI 的 `ruff format --check .` 却查。2026-11-27 因此红过一次
       # （1855d1b：交接包里的代码块注释对齐多两个空格），本地全绿 CI 红，
       # 差别只在扫描范围。这条钩子把口径拉齐到 CI，改动任何 md 都跑一次。
+      #
+      # 2026-11-28 修正：`ruff format --check .` 会扫**全仓库**，于是只要有
+      # 别人的文件正写到一半（哪怕不是 md），任何文档提交都会被它拦下——
+      # 实际发生：提交 M4-03 设计文档时被 `kb/api/trash.py`（工程师正在写的
+      # 未完成代码）拦了两次，只能临时 stash 才提交成功。
+      #
+      # 改成只查**暂存区里的 md**：`git diff --cached --name-only -z` 取路径，
+      # 用 `-z` 是因为中文文件名会被转义成八进制导致匹配不上。
+      # 用 shell 而非直接 entry，是因为 entry 拿不到「只针对暂存 md」的清单。
       - id: ruff-format-docs
-        name: 文档里的 Python 代码块格式（与 CI 同口径）
-        entry: ruff format --check .
+        name: 文档里的 Python 代码块格式（只查暂存的 md）
+        entry: bash -c 'mapfile -d "" -t files < <(git diff --cached --name-only -z --diff-filter=ACM | grep -zE "\.md$") && [ ${#files[@]} -eq 0 ] || ruff format --check "${files[@]}"'
         language: system
         files: \.md$
         pass_filenames: false
