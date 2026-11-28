@@ -243,28 +243,31 @@ class SearchService:
         #     用户继续翻，每页都是噪音
         #   - 每次白打一次 Meili（首次 + 重查 = 双倍 QPS）
         #
-        # 判据：**这一页空了、且后面也没有剩余** → 这是翻页，不是分数截的。
+        # 判据：**这一页空了、且用户是在翻页** → 这是翻页，不是分数截的。
         #
-        # 三组边界值必须同时满足，这是我改了两版才对的地方：
+        # 完整 12 格见 `tests/test_qa_search_probe.py` 的 docstring（QA 逐格验过）。
+        # 关键是这几个边界：
         #
         # | total | offset | 判定 | 理由 |
         # |---|---|---|---|
-        # | 0 | 0 | **放宽** | 库里真没有 → 放宽确认一次是合理的 |
-        # | 30 | 0 | **不放宽** | 有 30 条却 0 命中 → 确实是门槛截的，这才该放宽 |
-        # | 30 | 30 | **不放宽** | 正好翻到尾部之后 → 空页是正常的 |
-        # | 30 | 40 | **不放宽** | 翻过头了 → 空页是正常的 |
+        # | 0 | 0 | **放宽** | 库里真没有 → 放宽确认一次，代价小 |
+        # | 0 | 20 | **不放宽** | 库里 0 条还翻页 → 没东西可放宽，白打一次 Meili |
+        # | 30 | 0 | **不放宽** | 有 30 条却 0 命中 → 确实是门槛截的，这才是放宽的场景 |
+        # | 30 | 30 | **不放宽** | 正好翻到尾部之后 |
+        # | 30 | 40 | **不放宽** | 翻过头了 |
         #
-        # 所以「翻页」= `total > 0 且 total <= offset`；
-        # `total == 0` 是「库里没有」，`total > offset` 是「还有数据但 0 命中」
-        # （后者才是 `MIN_SCORE` 要放宽的场景）。
+        # 所以判据是 `offset > 0 且 total <= offset`——**下界用 `offset > 0`，
+        # 不能用 `0 < total`**。
         #
-        # 我第一版写 `total >= offset`：把 `total=30, offset=0`（**最该放宽的那种**）
-        # 也判成翻页，四条原有用例同时变红；第二版写 `total > offset`：把
-        # `total=30, offset=30` 判成该放宽，QA 这条红。
+        # 我前两版都错了，第三版（`0 < total <= offset`）只错 `total=0,offset>0`
+        # 这一格。QA 指出：那一格是「用户在第 1 页看到空结果，还点了下一页」，
+        # 库里 0 条却白打一次 Meili（strict + relaxed = 双倍 QPS），
+        # 且放宽后 `estimatedTotalHits` 若返回非 0，`estimatedTotal` 会从 0
+        # 吹成一个大数，分页器显示「还有 180 条」——用户一直翻，每页都空。
         #
         # `estimated_total` 为 `None`（响应缺字段）时保守地**不放宽**——
         # 宁可少一次放宽，也不要给用户一屏噪音。
-        paging = total is not None and 0 < total <= query.offset
+        paging = total is not None and query.offset > 0 and total <= query.offset
         if total is None or paging:
             log.info(
                 "0 命中但 estimated_total=%s、offset=%s，判定为翻页而非全被截，不放宽",

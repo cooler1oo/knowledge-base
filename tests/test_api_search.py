@@ -319,11 +319,19 @@ def test_limit超50夹到50() -> None:
     assert meili.calls[0]["limit"] == 50
 
 
-def test_offset超999夹到999() -> None:
+def test_offset超上限夹到MAX_OFFSET() -> None:
+    """超范围夹边界而不报错（与 `/api/items` 的既有口径一致）。
+
+    断言用 `MAX_OFFSET` 常量而不是字面量 999：这个上限与 `MAX_TOTAL_HITS`
+    联动（950 + 50 = 1000），写死数字的话调整上限时这条会假红。
+    """
+    from kb.search.config import MAX_OFFSET
+
     meili = FakeClient()
     response = _client(meili=meili).get("/api/search?offset=5000")
     assert response.status_code == 200
-    assert response.json()["offset"] == 999
+    assert response.json()["offset"] == MAX_OFFSET
+    assert meili.calls[0]["offset"] == MAX_OFFSET
 
 
 def test_limit为0时夹到1() -> None:

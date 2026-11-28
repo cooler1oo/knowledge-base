@@ -130,7 +130,17 @@ MAX_TERMS = 5
 
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 50
-MAX_OFFSET = 999
+
+#: `offset` 上限。**由 `MAX_TOTAL_HITS - MAX_LIMIT` 决定，不能独立取值。**
+#:
+#: 原来写 999：`999 + 50 = 1049 > maxTotalHits`，最后 49 条请求会被 Meili
+#: **静默截掉**——用户翻到 1000 条之后发现没有了，且没有任何提示。
+#:
+#: 两种修法：降到 950（保住 `maxTotalHits=1000`），或把 `maxTotalHits`
+#: 提到 1050（保住 999）。取前者，理由：个人知识库不会有翻到 1000 条以后
+#: 的需求，而提高 `maxTotalHits` 会增加 Meili 的内存占用。这一条定了之后
+#: `MAX_TOTAL_HITS` 回到 1000。
+MAX_OFFSET = 950
 
 # ── 时区（设计 §3.9）──────────────────────────────────────────
 
@@ -211,21 +221,17 @@ DISPLAYED_ATTRIBUTES: tuple[str, ...] = (
 
 #: Meili 单次搜索能返回的最大命中总数（`pagination.maxTotalHits`）。
 #:
-#: ## 必须 ≥ `MAX_OFFSET + MAX_LIMIT`
+#: ## 与 `MAX_OFFSET` / `MAX_LIMIT` 是一组，三者互相约束
 #:
-#: 这个数与下面两个分页常量是**一组**，三者互相约束。第一版各写一个值
-#: （999 / 50 / 1000），`offset=999&limit=50` 要求返回第 1000–1049 条，
-#: 而 `maxTotalHits=1000` 会把越界部分**静默截掉**——用户看到「翻到 1000 条
-#: 之后就没有了」，且没有任何提示说明是被上限切断的。QA 抓到这条。
+#: `offset=950&limit=50` 要求返回第 951–1000 条，所以必须是
+#: `MAX_OFFSET + MAX_LIMIT <= MAX_TOTAL_HITS`。
 #:
-#: 取 1050（= 999 + 50 + 1 的整数化）而不是把 `MAX_OFFSET` 降到 950：
-#: **降 offset 上限是无理由砍掉用户能翻到的范围**，而 Meili 多存 50 条的
-#: 内存代价可以忽略。上界由 `tests/test_search_query.py` 的分页常量用例
-#: 校验（`assert MAX_OFFSET + MAX_LIMIT <= MAX_TOTAL_HITS`），改任何一个
-#: 而不同步其余两个就会立刻红。
+#: 第一版这三个数各写一处（999 / 50 / 1000），越界部分被 Meili **静默截掉**
+#: ——用户翻到 1000 条之后发现没有了，没有提示说是被上限切断的。QA 抓到。
 #:
-#: 个人自用库远低于这个量级；设上限是为了让 Meili 的内存占用可预测。
-MAX_TOTAL_HITS = 1050
+#: 现在靠模块底部的 `assert` 守住（见文件末尾）：改任何一个而不同步其余
+#: 就在 **import 时**爆炸，而不是等用户翻到底。
+MAX_TOTAL_HITS = 1000
 
 
 def index_settings() -> dict[str, object]:
@@ -250,3 +256,27 @@ def index_settings() -> dict[str, object]:
         "displayedAttributes": list(DISPLAYED_ATTRIBUTES),
         "pagination": {"maxTotalHits": MAX_TOTAL_HITS},
     }
+
+
+# ── 模块级自检：分页三常量必须互相一致 ─────────────────────────
+#
+# **在 import 时爆炸，而不是等用户翻到底。**
+#
+# `offset` 与 `limit` 都是用户可控的查询参数，两者之积加上 offset 决定
+# Meili 要返回的最大序号。超过 `maxTotalHits` 的部分会被 Meili **静默截掉**
+# ——不报错、不降级、`estimatedTotal` 也照常返回，只是那一页永远空。
+# 用户会认为「库里只有这么多」，而实际上是被我们的常量切断的。
+#
+# 放模块级而不是只写测试：`AGENTS.md` §八 要求「能机器检查就不靠自觉」。
+# 测试只有在有人跑测试时才生效，而这条错误会在**任何** import 本模块的进程里
+# 立刻炸开——包括部署时的第一次启动。
+#
+# 用 `raise` 而不是 `assert`：`python -O` 会去掉 assert，而这不是可以关掉的检查。
+if MAX_OFFSET + MAX_LIMIT > MAX_TOTAL_HITS:
+    raise RuntimeError(
+        f"分页常量不一致：MAX_OFFSET({MAX_OFFSET}) + MAX_LIMIT({MAX_LIMIT}) = "
+        f"{MAX_OFFSET + MAX_LIMIT} > MAX_TOTAL_HITS({MAX_TOTAL_HITS})。"
+        "超出部分会被 Meili 静默截掉，用户翻到底会以为库里只有这么多内容。"
+        "三个数改任何一个都要同步其余："
+        "MAX_OFFSET = MAX_TOTAL_HITS - MAX_LIMIT。"
+    )

@@ -824,9 +824,13 @@ def test_查询级minScore比服务级更宽松时以查询级为准() -> None:
 
 
 def test_分页常量符合契约() -> None:
-    """`/api/search` 的约束（设计 §3.7）：limit 1–50、offset 0–999。
-    常量落在这里而不是 api 层，是为了让「夹边界」与「校验」用同一组数。"""
-    assert (DEFAULT_LIMIT, MAX_LIMIT, MAX_OFFSET) == (20, 50, 999)
+    """`/api/search` 的约束：limit 1–50、offset 0–950。
+
+    `MAX_OFFSET` 从 999 降到 950 是**与 `MAX_TOTAL_HITS` 联动**的结果
+    （950 + 50 = 1000），不是独立调整。理由见 `config.MAX_OFFSET` 的注释：
+    999 + 50 = 1049 会让最后 49 条被 Meili 静默截掉。
+    """
+    assert (DEFAULT_LIMIT, MAX_LIMIT, MAX_OFFSET) == (20, 50, 950)
 
 
 def test_offset上限加limit上限不超过maxTotalHits() -> None:
