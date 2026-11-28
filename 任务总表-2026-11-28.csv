@@ -16,123 +16,123 @@
 15,M3-02,需求,R5,AI 生成摘要 ≤100 字,P0,done,,AI 摘要 ≤100 字,kb/ai/ + worker summarize 步
 16,M3-03,需求,R5,AI 打 1-3 个主题标签,P0,done,,AI 打 1-3 个主题标签,worker tag 步
 17,M3-04,需求,R5,AI 只从已有词表选，不自创,P0,done,,AI 只从已有词表选，不自创,prompts.py + validate.py
-18,M3-05,需求,R5,图片一次调用产出 OCR + 描述,P0,todo,,⏸ 等待视觉模型配置；代码可先写，done 需实测识别准确率,worker ocr 步未实现（loop.py 明写）
-19,M3-08,需求,R5,类型修正被记住（域名→类型）,P0,done,,A 半完成：T01 规则读写 kb/store/domain_rules.py；T02 domain_of；T03 fetch 步套用规则（run_fetch 覆盖 decide_kind 的建议）；T04 PATCH /api/items/{id} 改 kind 并 remember + enqueue index。B 半（完整编辑界面）留给前端阶段由 M5-07 覆盖。,kb/store/domain_rules.py; kb/extract/normalize.py; kb/worker/steps.py; kb/api/items.py; kb/store/items.py
-20,E-34,工程,PX,设置页（可视化配置入口，泛框架）,P0,todo,,泛框架：统一承载 AI 配置、域名类型规则（M3-08）、标签/筛子管理的入口。具体界面结构、密钥存储、改配置是否需重启 worker 等细节留到该轮施工时完整设计，此处不定死。岔路待定：用现有手写 HTML 做，还是等 E-26 前端工程建好再做,—
-21,M3-07,需求,R5,跨内容自动关联,P2,todo,,P2；待明确关联依据（标签共现 / 语义相似 / 同源），先问清再做,P2，未实现
-22,E-19,工程,R6,中文分词与二字词兜底,工程,done,,随 E-18,kb/search/query.py + Charabia 真机验证 0.98-1.0
-23,M6-01,需求,R6,关键词搜索：标题/正文/摘要/标签/OCR,P0,done,,关键词搜五路字段,六字段索引 + 真机五路命中（summary/ocr/tags/author/正文）
-24,M6-02,需求,R6,中文分词多词匹配，按覆盖度排序,P0,done,M6-01,中文分词多词匹配按覆盖度排序,searchableAttributes 顺序 + words 排序，真机 0.976
-25,M6-03,需求,R6,二字中文词兜底检索,P0,done,M6-01,二字中文词兜底检索,二字词真机 0.98-0.997，MIN_SCORE=0.30 实测标定
-26,M6-04,需求,R6,分类内搜索,P1,todo,M6-01,分类内搜索,P1，未实现
-27,M6-05,需求,R6,筛选器组合：类型×标签×时间×状态,P0,done,M6-01,筛选器组合 类型×标签×时间×状态,filterableAttributes + 真机 kind/tags/时间/组合全通
-28,M6-06,需求,R6,语义搜索（记意思不记词）,P1,todo,,语义搜索,P1，未实现
-29,M6-07,需求,R6,搜索词高亮 + 命中位置跳转,P1,todo,,搜索词高亮+命中跳转,P1，未实现
-30,M6-08,需求,R6,搜索历史，常搜词固化成筛子,P2,todo,,搜索历史/常搜词固化,P2，未实现
-31,M6-09,需求,R6,按颜色找图,P3,todo,,AGENTS.md §3 明确不做（颜色检索 / 以图找图）,P3，明确不做（AGENTS.md 三）
-32,M6-10,需求,R6,以图找图 / 相似图,P3,todo,,AGENTS.md §3 明确不做,P3，明确不做（AGENTS.md 三）
-33,E-14,工程,R7,视觉链路（切镜头 + 抽帧）,工程,done,,PySceneDetect + cv2，平板已验,kb/vision/ + R7 记录
-34,M5-01,需求,R7,类型固定 6+1 不可增删,P0,done,,类型固定 6+1 不可增删,0001_schema.sql item_kinds 表 + seed
-35,M5-02,需求,R7,每个类型自带属性字段,P0,done,,每类型自带属性字段,items.props jsonb
-36,M5-03,需求,R7,两级标签，界面呈树,P0,done,,两级标签呈树,tags.parent_id + tags.py
-37,M5-04,需求,R7,一条内容可挂多个标签,P0,done,,一条内容挂多个标签,item_tags 多对多
-38,E-21,工程,R7,组织层（标签树 + 筛子 + 日期视图）,工程,todo,,施工计划 R7 明细「待写」,施工计划 §8
-39,M5-05,需求,R7,查询（筛子）：保存的筛选条件,P0,todo,,查询（筛子）保存筛选条件,无 queries 表/store/端点
-40,M5-06,需求,R7,预置 4 个筛子,P0,todo,M5-05,预置 4 个筛子,依赖 M5-05
-41,M5-07,需求,R7,批量操作：改标签/归档/删除,P1,todo,,批量改标签/归档/删除,P1，未实现
-42,M5-08,需求,R7,规则引擎按来源自动打标签,P2,todo,,规则引擎按来源自动打标签,P2，未实现
-43,M5-09,需求,R7,星级评分,P2,todo,,items 表有 rating 字段设计，未验证可用,P2；items 有 rating 概念未验
-44,M5-10,需求,R7,私密内容加锁,P3,todo,,私密内容加锁,P3，未实现
-45,M5-11,需求,R7,标签治理：改名/合并/撤销 AI 标签,P1,todo,M5-03,标签治理（改名/合并/撤销 AI 标签）,tags.py 有读写，无治理端点
-46,M1-01,需求,R8,粘贴链接即存，自动进入处理流程,P0,done,,粘贴链接即存（POST /api/items）,kb/api/items.py create_or_list
-47,E-22,工程,R8,手机入口 APK + 分享桥,工程,todo,,用户已定 APK，不用 PWA,AGENTS.md §2.1
-48,M1-02,需求,R8,安卓系统分享接收（已改 APK）,P0,todo,,原定 PWA，用户在 2026-11-26 改为 APK（AGENTS.md §2.1 豁免项）,R8(APK) 未开工；M1-02 原定 PWA，用户已改为 APK
-49,M1-03,需求,R8,图片上传 / 剪贴板粘贴截图,P0,todo,,图片上传/剪贴板粘贴截图,/api/items/upload 未实现
-50,M1-04,需求,R8,文件上传（PDF/Word/Excel/压缩包）,P1,todo,,文件上传 PDF/Word/Excel,同上，未实现
-51,M1-05,需求,R8,浏览器插件：存当前页/链接/片段,P1,todo,,浏览器插件,未开工
-52,M1-06,需求,R8,批量导入旧书签,P1,todo,,批量导入旧书签,未开工
-53,M1-07,需求,R8,微信转发入库,P2,todo,,微信转发入库,P2，未开工
-54,M1-08,需求,R8,RSS 订阅自动收录,P2,todo,,RSS 订阅收录,P2，未开工
-55,M1-09,需求,R8,邮件转发入库,P2,todo,,邮件转发入库,P2，未开工
-56,M1-10,需求,R8,手机分享图片 / 文件,P2,todo,,手机分享图片/文件,P2，未开工
-57,M10-01,需求,R8,沉浸阅读：干净排版可调字号,P1,todo,,沉浸阅读视图,P1，无前端
-58,M10-02,需求,R8,阅读进度与滚动位置记忆,P1,todo,,阅读进度记忆,P1，无前端
-59,M10-03,需求,R8,高亮与批注（划线写想法）,P1,todo,,高亮与批注,P1，无前端
-60,M10-04,需求,R8,「我的划线」独立视图,P2,todo,M10-03,我的划线独立视图,P2，无前端
-61,M10-05,需求,R8,读完自动标已读 + 一键归档,P1,todo,,读完自动标已读+归档,P1，无前端
-62,M10-06,需求,R8,键盘连续阅读,P2,todo,,键盘连续阅读,P2，无前端
-63,M10-08,需求,R8,PDF 内阅读与标注,P3,todo,,PDF 内阅读与标注,P3，无前端
-64,M10-09,需求,R8,全文翻译（选中段落）,P3,todo,,全文翻译,P3，无前端
-65,E-15,工程,R8M,媒体下载（封面落盘 + attachments）,工程,done,,SSRF 三层 + 签名 URL 下载,kb/media/ + R8 记录
-66,E-16,工程,R8M,/api/media/{key} 读取端点,工程,done,,按 mime 放行、需登录,kb/api/media.py
-67,M2-01,需求,R8M,抓标题/作者/时间/封面/域名,P0,done,,抓标题/作者/时间/封面/域名,kb/extract/normalize.py + parsehub_adapter
-68,M2-03,需求,R8M,封面下载到自己存储，不引用外链,P0,done,,封面下载到自有存储,kb/media/ 全链 + attachments 落库（R8 完成）
-69,M2-04,需求,R8M,视频抓封面、时长、简介,P0,done,,视频抓封面/时长/简介,normalize.py 取 duration_sec 与 thumb_url
-70,M2-09,需求,R8M,抓取失败降级为链接，记录不丢,P0,done,,抓取失败降级为 link 类型,router.py 三层降级
-71,M4-01,需求,R8M,元数据存云数据库,P0,done,,元数据存云数据库,kb/store/items.py + Postgres
-72,M4-02,需求,R8M,封面/图片/文件存对象存储,P0,done,,封面/图片/文件存对象存储,R8 完成，KB_MEDIA_ROOT
-73,M4-06,需求,R8M,失败任务自动重试上限 3 次,P0,done,,失败任务自动重试上限 3 次,jobs.py 有 attempts+1>=3 才 failed + run_after 退避
-74,E-17,工程,R8M,ASR（Whisper 转录）代码,工程,todo,,kb/asr/ 已有 decode+segment，未接 worker,kb/asr/ 有 decode+segment，未接 worker 未验
-75,E-18,工程,R6,检索层（Meilisearch + index 步）,工程,done,E-17,index 步未实现，loop.py 领到退回 pending,kb/search/ + kb/store/search.py + kb/worker/steps.py run_index
-76,E-20,工程,R6,/api/search 端点,工程,done,E-18,未实现,kb/api/search.py + GET /api/search 真机 curl 通过
-77,M2-02,需求,R8M,正文抽取：去广告去导航只留正文,P0,todo,,正文只原样落 content_text，没做 trafilatura 净化，未达「去广告」要求,⚠️只落 content_text，无 trafilatura 净化
+18,M3-08,需求,R5,类型修正被记住（域名→类型）,P0,done,,A 半完成：T01 规则读写 kb/store/domain_rules.py；T02 domain_of；T03 fetch 步套用规则（run_fetch 覆盖 decide_kind 的建议）；T04 PATCH /api/items/{id} 改 kind 并 remember + enqueue index。B 半（完整编辑界面）留给前端阶段由 M5-07 覆盖。,kb/store/domain_rules.py; kb/extract/normalize.py; kb/worker/steps.py; kb/api/items.py; kb/store/items.py
+19,E-19,工程,R6,中文分词与二字词兜底,工程,done,,随 E-18,kb/search/query.py + Charabia 真机验证 0.98-1.0
+20,M6-01,需求,R6,关键词搜索：标题/正文/摘要/标签/OCR,P0,done,,关键词搜五路字段,六字段索引 + 真机五路命中（summary/ocr/tags/author/正文）
+21,M6-02,需求,R6,中文分词多词匹配，按覆盖度排序,P0,done,M6-01,中文分词多词匹配按覆盖度排序,searchableAttributes 顺序 + words 排序，真机 0.976
+22,M6-03,需求,R6,二字中文词兜底检索,P0,done,M6-01,二字中文词兜底检索,二字词真机 0.98-0.997，MIN_SCORE=0.30 实测标定
+23,M6-04,需求,R6,分类内搜索,P1,done,M6-01,分类内搜索,kb/api/search.py _parse_filter + tests/test_api_search.py（kind 重复/逗号/非法三组判据）
+24,M6-05,需求,R6,筛选器组合：类型×标签×时间×状态,P0,done,M6-01,筛选器组合 类型×标签×时间×状态,filterableAttributes + 真机 kind/tags/时间/组合全通
+25,E-14,工程,R7,视觉链路（切镜头 + 抽帧）,工程,done,,PySceneDetect + cv2，平板已验,kb/vision/ + R7 记录
+26,M5-01,需求,R7,类型固定 6+1 不可增删,P0,done,,类型固定 6+1 不可增删,0001_schema.sql item_kinds 表 + seed
+27,M5-02,需求,R7,每个类型自带属性字段,P0,done,,每类型自带属性字段,items.props jsonb
+28,M5-03,需求,R7,两级标签，界面呈树,P0,done,,两级标签呈树,tags.parent_id + tags.py
+29,M5-04,需求,R7,一条内容可挂多个标签,P0,done,,一条内容挂多个标签,item_tags 多对多
+30,M1-01,需求,R8,粘贴链接即存，自动进入处理流程,P0,done,,粘贴链接即存（POST /api/items）,kb/api/items.py create_or_list
+31,E-15,工程,R8M,媒体下载（封面落盘 + attachments）,工程,done,,SSRF 三层 + 签名 URL 下载,kb/media/ + R8 记录
+32,E-16,工程,R8M,/api/media/{key} 读取端点,工程,done,,按 mime 放行、需登录,kb/api/media.py
+33,M2-01,需求,R8M,抓标题/作者/时间/封面/域名,P0,done,,抓标题/作者/时间/封面/域名,kb/extract/normalize.py + parsehub_adapter
+34,M2-03,需求,R8M,封面下载到自己存储，不引用外链,P0,done,,封面下载到自有存储,kb/media/ 全链 + attachments 落库（R8 完成）
+35,M2-04,需求,R8M,视频抓封面、时长、简介,P0,done,,视频抓封面/时长/简介,normalize.py 取 duration_sec 与 thumb_url
+36,M2-09,需求,R8M,抓取失败降级为链接，记录不丢,P0,done,,抓取失败降级为 link 类型,router.py 三层降级
+37,M4-01,需求,R8M,元数据存云数据库,P0,done,,元数据存云数据库,kb/store/items.py + Postgres
+38,M4-02,需求,R8M,封面/图片/文件存对象存储,P0,done,,封面/图片/文件存对象存储,R8 完成，KB_MEDIA_ROOT
+39,M4-06,需求,R8M,失败任务自动重试上限 3 次,P0,done,,失败任务自动重试上限 3 次,jobs.py 有 attempts+1>=3 才 failed + run_after 退避
+40,E-18,工程,R6,检索层（Meilisearch + index 步）,工程,done,E-17,index 步未实现，loop.py 领到退回 pending,kb/search/ + kb/store/search.py + kb/worker/steps.py run_index
+41,E-20,工程,R6,/api/search 端点,工程,done,E-18,未实现,kb/api/search.py + GET /api/search 真机 curl 通过
+42,M9-01,需求,R9,账号登录（单账号）,P0,done,,账号登录（单账号）,kb/api/auth.py + sessions 表
+43,M9-07,需求,R9,AI 用量与花费可见,P2,done,,AI 用量与花费可见,/api/ai/usage + kb/store/usage.py
+44,M9-04,需求,R9,PWA 安装（已改 APK）,P0,done,,用户已改 APK，PWA 安装不再需要；离线壳能力需在 APK 轮评估,已由 APK 方案替代（AGENTS.md §2.1 用户豁免），PWA 作废不实施
+45,E-32,工程,PX,前端：PWA manifest 与安装,工程,done,,用户改 APK 后 PWA 作废，仍需离线壳能力评估,已由 APK 方案替代（AGENTS.md §2.1 用户豁免），PWA 作废不实施
+46,E-37,工程,ENG,文档规则检查（doc_checks）,工程,done,,禁用词/命名/复用调研,tools/doc_checks/
+47,E-38,工程,ENG,交付自检一条命令（--all）,工程,done,,架构+干净+已推送+跑过测试,tools/eng_checks/__main__.py
+48,E-39,工程,ENG,真库覆盖提示（pgSkipped）,工程,done,,避免「全绿=都验过」误判,tests/conftest.py + git_rules.py
+49,E-40,工程,ENG,迁移 README 编号守门用例,工程,done,,防文档漂移,tests/test_migrate.py
+50,E-44,工程,ENG,覆盖率底线 55%,工程,done,,当前 85%,pyproject.toml [tool.coverage.report]
+51,E-42,工程,DOC,技术方案 M2-03/M4-02 标记已实现,工程,done,,R8 轮补,docs/tech/2026-11-26-技术方案.md
+52,E-43,工程,DOC,每轮交接包（四项固定产出）,工程,done,,实测/偏离/已知坑/未完成,deliverables/construction/
+53,M4-03,需求,R8M,软删除 + 回收站，可恢复,P0,todo,,软删除+回收站可恢复,schema 有 deleted_at，无 restore/trash 端点
+54,E-24,工程,R9,数据自动备份（restic）,工程,todo,,无配置,—
+55,E-25,工程,R9,备份可恢复演练,工程,todo,E-24,随 E-24,—
+56,M9-06,需求,R9,数据自动备份,P0,todo,E-24,数据自动备份,P0，无 restic 配置
+57,E-23,工程,R9,运维闭环（备份 + 告警 + 导出）,工程,todo,,施工计划 R9 明细「待写」,施工计划 §8
+58,M2-02,需求,R8M,正文抽取：去广告去导航只留正文,P0,todo,,正文只原样落 content_text，没做 trafilatura 净化，未达「去广告」要求,⚠️只落 content_text，无 trafilatura 净化
+59,M1-03,需求,R8,图片上传 / 剪贴板粘贴截图,P0,todo,,图片上传/剪贴板粘贴截图,/api/items/upload 未实现
+60,M1-04,需求,R8,文件上传（PDF/Word/Excel/压缩包）,P1,todo,,文件上传 PDF/Word/Excel,同上，未实现
+61,M2-10,需求,R8M,抓取失败原因可见、可重试,P0,todo,,抓取失败原因可见、可重试,P0 但无排期；无 /api/items/{id}/retry
+62,E-35,工程,ENG,失败原因可见 + 重试端点,工程,todo,M2-10,M2-10，P0 但无排期,—
+63,M2-07,需求,R8M,动态渲染页用无头浏览器兜底,P1,todo,,动态渲染页无头浏览器兜底,未实现
+64,M2-08,需求,R8M,整页快照存档（压缩 HTML）,P1,todo,,整页快照存档（压缩 HTML）,未实现
+65,M1-02,需求,R8,安卓系统分享接收（已改 APK）,P0,todo,,原定 PWA，用户在 2026-11-26 改为 APK（AGENTS.md §2.1 豁免项）,R8(APK) 未开工；M1-02 原定 PWA，用户已改为 APK
+66,E-22,工程,R8,手机入口 APK + 分享桥,工程,todo,,用户已定 APK，不用 PWA,AGENTS.md §2.1
+67,M1-10,需求,R8,手机分享图片 / 文件,P2,todo,,手机分享图片/文件,P2，未开工
+68,M1-05,需求,R8,浏览器插件：存当前页/链接/片段,P1,todo,,浏览器插件,未开工
+69,M1-06,需求,R8,批量导入旧书签,P1,todo,,批量导入旧书签,未开工
+70,M1-07,需求,R8,微信转发入库,P2,todo,,微信转发入库,P2，未开工
+71,M1-08,需求,R8,RSS 订阅自动收录,P2,todo,,RSS 订阅收录,P2，未开工
+72,M1-09,需求,R8,邮件转发入库,P2,todo,,邮件转发入库,P2，未开工
+73,M9-02,需求,R9,会话长期保持 + 登录后回原链接,P0,todo,,会话中间件与 cookie 已在，未验证「分享冷启动后回原链接」,会话在，但 grep next/redirect/returnTo 零命中，无回跳逻辑
+74,M9-03,需求,R9,基础写入频率限制,P0,todo,,基础写入频率限制,P0，无限流代码
+75,M9-05,需求,R9,后台任务队列，失败重试 3 次状态可见,P0,todo,E-36,后台任务队列失败重试 3 次状态可见,重试已实现(M4-06)，缺 /api/items/{id}/status 端点
+76,E-36,工程,ENG,数据自动重试后状态可见端点,工程,todo,,/api/items/{id}/status,—
+77,M3-05,需求,R5,图片一次调用产出 OCR + 描述,P0,todo,,⏸ 等待视觉模型配置；代码可先写，done 需实测识别准确率,worker ocr 步未实现（loop.py 明写）
 78,M2-05,需求,R8M,视频抓字幕（B站/YouTube）,P1,todo,,视频抓字幕（B站/YouTube）,kb/asr/ 无字幕抓取
-79,M3-06,需求,R5,视频章节化摘要带时间戳,P2,todo,M2-05,视频章节化摘要带时间戳,P2；kb/vision 能抽帧但未接 AI
-80,M10-07,需求,R8,视频字幕侧栏 + 时间戳跳转,P2,todo,M2-05,视频字幕侧栏+时间戳跳转,P2，无前端
-81,M2-06,需求,R8M,无字幕视频语音转录（Whisper）,P2,todo,M2-05,无字幕视频语音转录,kb/asr/decode+segment 已建，未接 worker
-82,M2-07,需求,R8M,动态渲染页用无头浏览器兜底,P1,todo,,动态渲染页无头浏览器兜底,未实现
-83,M2-08,需求,R8M,整页快照存档（压缩 HTML）,P1,todo,,整页快照存档（压缩 HTML）,未实现
-84,M2-10,需求,R8M,抓取失败原因可见、可重试,P0,todo,,抓取失败原因可见、可重试,P0 但无排期；无 /api/items/{id}/retry
-85,M4-03,需求,R8M,软删除 + 回收站，可恢复,P0,todo,,软删除+回收站可恢复,schema 有 deleted_at，无 restore/trash 端点
-86,M4-04,需求,R8M,同一 URL 重复存时提示合并,P1,todo,M1-01,同 URL 重复存提示合并,有 duplicate 标记，无合并交互
-87,M4-05,需求,R8M,完整导出 JSON + Markdown,P0,todo,,完整导出 JSON+Markdown,/api/export 未实现
-88,M4-07,需求,R8M,视频原文件按需下载,P2,todo,,视频原文件按需下载,P2，R8 明确不做
-89,M9-01,需求,R9,账号登录（单账号）,P0,done,,账号登录（单账号）,kb/api/auth.py + sessions 表
-90,M9-07,需求,R9,AI 用量与花费可见,P2,done,,AI 用量与花费可见,/api/ai/usage + kb/store/usage.py
-91,E-23,工程,R9,运维闭环（备份 + 告警 + 导出）,工程,todo,,施工计划 R9 明细「待写」,施工计划 §8
-92,E-24,工程,R9,数据自动备份（restic）,工程,todo,,无配置,—
-93,E-25,工程,R9,备份可恢复演练,工程,todo,E-24,随 E-24,—
-94,M9-02,需求,R9,会话长期保持 + 登录后回原链接,P0,todo,,会话中间件与 cookie 已在，未验证「分享冷启动后回原链接」,会话在，但 grep next/redirect/returnTo 零命中，无回跳逻辑
-95,M9-03,需求,R9,基础写入频率限制,P0,todo,,基础写入频率限制,P0，无限流代码
-96,M9-04,需求,R9,PWA 安装（已改 APK）,P0,todo,,用户已改 APK，PWA 安装不再需要；离线壳能力需在 APK 轮评估,用户已改为 APK，PWA 作废
-97,M9-05,需求,R9,后台任务队列，失败重试 3 次状态可见,P0,todo,,后台任务队列失败重试 3 次状态可见,重试已实现(M4-06)，缺 /api/items/{id}/status 端点
-98,M9-06,需求,R9,数据自动备份,P0,todo,,数据自动备份,P0，无 restic 配置
-99,M9-08,需求,R9,深色 / 浅色主题,P1,todo,,深色/浅色主题,无前端
-100,M9-09,需求,R9,桌面壳（Electron 打 Windows exe）,P1,todo,,桌面壳 Electron 打 exe,P1，未开工
-101,E-26,工程,PX,前端：列表与卡片网格,工程,todo,,全库无前端目录,—
-102,E-27,工程,PX,前端：详情页,工程,todo,E-26,随 E-26,—
-103,E-28,工程,PX,前端：搜索与筛选界面,工程,todo,E-26,随 E-26,—
-104,E-29,工程,PX,前端：标签树与筛子管理,工程,todo,E-26,随 E-26,—
-105,E-30,工程,PX,前端：日期视图（年月热力网格）,工程,todo,E-26,M7-12 P0,—
-106,E-31,工程,PX,前端：沉浸阅读与高亮,工程,todo,,M10 系列,—
-107,E-32,工程,PX,前端：PWA manifest 与安装,工程,todo,,用户改 APK 后 PWA 作废，仍需离线壳能力评估,—
-108,E-33,工程,PX,前端：深浅色主题,工程,todo,,M9-08,—
-109,M7-01,需求,PX,卡片网格，封面为主视觉,P0,todo,M2-03,卡片网格封面为主视觉,无前端
-110,M7-02,需求,PX,时间轴视图，按周/月折叠,P0,todo,,时间轴视图按周月折叠,无前端
-111,M7-03,需求,PX,详情页：封面/播放器+摘要+标签,P0,todo,M2-03,详情页封面/播放器+摘要+标签,无前端；播放器形态待定
-112,M7-04,需求,PX,随机漫游,P1,todo,M7-01,随机漫游,P1，无前端
-113,M7-05,需求,PX,每日回顾：每天推 3-5 条,P1,todo,M7-01,每日回顾推 3-5 条,P1，无前端
-114,M7-06,需求,PX,未读清理：滑卡片批量处理,P2,todo,,未读清理滑卡片,P2，无前端
-115,M7-07,需求,PX,详情页底部同标签推荐,P1,todo,M5-03,详情页底部同标签推荐,P1，无前端
-116,M7-08,需求,PX,高亮与批注,P2,todo,,高亮与批注,P2，无前端
-117,M7-09,需求,PX,沉浸式阅读视图,P2,todo,,沉浸式阅读视图,P2，无前端
-118,M7-10,需求,PX,键盘操作,P2,todo,,键盘操作,P2，无前端
-119,M7-11,需求,PX,朗读 TTS,P3,todo,,朗读 TTS,P3，无前端
-120,M7-12,需求,PX,日期视图：年月分栏+热力网格,P0,todo,M7-01,日期视图（年月+热力网格）,P0，无前端
-121,M7-13,需求,PX,阅读进度与滚动位置记忆,P1,todo,,阅读进度与滚动位置记忆,P1，无前端
-122,M8-01,需求,PX,打开原文（新窗口）,P0,todo,,打开原文新窗口,无前端
-123,M8-02,需求,PX,单条分享（链接+摘要）,P2,todo,,单条分享,P2，未实现
-124,M8-03,需求,PX,生成合集 / 清单,P2,todo,,生成合集/清单,P2，未实现
-125,M8-04,需求,PX,全库问答（RAG）,P3,todo,,全库问答 RAG,P3，未实现
-126,M8-05,需求,PX,单条问答,P3,todo,,单条问答,P3，未实现
-127,M8-06,需求,PX,MCP / API 开放给 AI agent,P3,todo,,MCP/API 开放给 agent,P3，未实现
-128,E-37,工程,ENG,文档规则检查（doc_checks）,工程,done,,禁用词/命名/复用调研,tools/doc_checks/
-129,E-38,工程,ENG,交付自检一条命令（--all）,工程,done,,架构+干净+已推送+跑过测试,tools/eng_checks/__main__.py
-130,E-39,工程,ENG,真库覆盖提示（pgSkipped）,工程,done,,避免「全绿=都验过」误判,tests/conftest.py + git_rules.py
-131,E-40,工程,ENG,迁移 README 编号守门用例,工程,done,,防文档漂移,tests/test_migrate.py
-132,E-44,工程,ENG,覆盖率底线 55%,工程,done,,当前 85%,pyproject.toml [tool.coverage.report]
-133,E-35,工程,ENG,失败原因可见 + 重试端点,工程,todo,E-34,M2-10，P0 但无排期,—
-134,E-36,工程,ENG,数据自动重试后状态可见端点,工程,todo,,/api/items/{id}/status,—
-135,E-42,工程,DOC,技术方案 M2-03/M4-02 标记已实现,工程,done,,R8 轮补,docs/tech/2026-11-26-技术方案.md
-136,E-43,工程,DOC,每轮交接包（四项固定产出）,工程,done,,实测/偏离/已知坑/未完成,deliverables/construction/
+79,M2-06,需求,R8M,无字幕视频语音转录（Whisper）,P2,todo,M2-05,无字幕视频语音转录,kb/asr/decode+segment 已建，未接 worker
+80,M3-06,需求,R5,视频章节化摘要带时间戳,P2,todo,M2-05,视频章节化摘要带时间戳,P2；kb/vision 能抽帧但未接 AI
+81,E-17,工程,R8M,ASR（Whisper 转录）代码,工程,todo,,kb/asr/ 已有 decode+segment，未接 worker,kb/asr/ 有 decode+segment，未接 worker 未验
+82,M4-05,需求,R8M,完整导出 JSON + Markdown,P0,todo,,完整导出 JSON+Markdown,/api/export 未实现
+83,M4-04,需求,R8M,同一 URL 重复存时提示合并,P1,todo,M1-01,同 URL 重复存提示合并,有 duplicate 标记，无合并交互
+84,M4-07,需求,R8M,视频原文件按需下载,P2,todo,,视频原文件按需下载,P2，R8 明确不做
+85,M5-05,需求,R7,查询（筛子）：保存的筛选条件,P0,todo,,查询（筛子）保存筛选条件,无 queries 表/store/端点
+86,M5-06,需求,R7,预置 4 个筛子,P0,todo,M5-05,预置 4 个筛子,依赖 M5-05
+87,M5-07,需求,R7,批量操作：改标签/归档/删除,P1,todo,,批量改标签/归档/删除,P1，未实现
+88,M5-11,需求,R7,标签治理：改名/合并/撤销 AI 标签,P1,todo,M5-03,标签治理（改名/合并/撤销 AI 标签）,tags.py 有读写，无治理端点
+89,M5-08,需求,R7,规则引擎按来源自动打标签,P2,todo,,规则引擎按来源自动打标签,P2，未实现
+90,M5-09,需求,R7,星级评分,P2,todo,,items 表有 rating 字段设计，未验证可用,P2；items 有 rating 概念未验
+91,M5-10,需求,R7,私密内容加锁,P3,todo,,私密内容加锁,P3，未实现
+92,M3-07,需求,R5,跨内容自动关联,P2,todo,,P2；待明确关联依据（标签共现 / 语义相似 / 同源），先问清再做,P2，未实现
+93,M6-06,需求,R6,语义搜索（记意思不记词）,P1,todo,,语义搜索,P1，未实现
+94,M6-07,需求,R6,搜索词高亮 + 命中位置跳转,P1,todo,,搜索词高亮+命中跳转,P1，未实现
+95,M6-08,需求,R6,搜索历史，常搜词固化成筛子,P2,todo,,搜索历史/常搜词固化,P2，未实现
+96,M6-09,需求,R6,按颜色找图,P3,todo,,AGENTS.md §3 明确不做（颜色检索 / 以图找图）,P3，明确不做（AGENTS.md 三）
+97,M6-10,需求,R6,以图找图 / 相似图,P3,todo,,AGENTS.md §3 明确不做,P3，明确不做（AGENTS.md 三）
+98,M10-03,需求,R8,高亮与批注（划线写想法）,P1,todo,,高亮与批注,P1，无前端
+99,M10-01,需求,R8,沉浸阅读：干净排版可调字号,P1,todo,,沉浸阅读视图,P1，无前端
+100,M10-02,需求,R8,阅读进度与滚动位置记忆,P1,todo,,阅读进度记忆,P1，无前端
+101,M10-04,需求,R8,「我的划线」独立视图,P2,todo,M10-03,我的划线独立视图,P2，无前端
+102,M10-05,需求,R8,读完自动标已读 + 一键归档,P1,todo,,读完自动标已读+归档,P1，无前端
+103,M10-06,需求,R8,键盘连续阅读,P2,todo,,键盘连续阅读,P2，无前端
+104,M10-07,需求,R8,视频字幕侧栏 + 时间戳跳转,P2,todo,M2-05,视频字幕侧栏+时间戳跳转,P2，无前端
+105,M10-08,需求,R8,PDF 内阅读与标注,P3,todo,,PDF 内阅读与标注,P3，无前端
+106,M10-09,需求,R8,全文翻译（选中段落）,P3,todo,,全文翻译,P3，无前端
+107,E-21,工程,R7,组织层（标签树 + 筛子 + 日期视图）,工程,todo,,施工计划 R7 明细「待写」,施工计划 §8
+108,E-34,工程,PX,设置页（可视化配置入口，泛框架）,P0,todo,,泛框架：统一承载 AI 配置、域名类型规则（M3-08）、标签/筛子管理的入口。具体界面结构、密钥存储、改配置是否需重启 worker 等细节留到该轮施工时完整设计，此处不定死。岔路待定：用现有手写 HTML 做，还是等 E-26 前端工程建好再做,—
+109,M9-08,需求,R9,深色 / 浅色主题,P1,todo,,深色/浅色主题,无前端
+110,M9-09,需求,R9,桌面壳（Electron 打 Windows exe）,P1,todo,,桌面壳 Electron 打 exe,P1，未开工
+111,E-26,工程,PX,前端：列表与卡片网格,工程,todo,,全库无前端目录,—
+112,E-27,工程,PX,前端：详情页,工程,todo,E-26,随 E-26,—
+113,E-28,工程,PX,前端：搜索与筛选界面,工程,todo,E-26,随 E-26,—
+114,E-29,工程,PX,前端：标签树与筛子管理,工程,todo,E-26,随 E-26,—
+115,E-30,工程,PX,前端：日期视图（年月热力网格）,工程,todo,E-26,M7-12 P0,—
+116,E-31,工程,PX,前端：沉浸阅读与高亮,工程,todo,,M10 系列,—
+117,E-33,工程,PX,前端：深浅色主题,工程,todo,,M9-08,—
+118,M7-01,需求,PX,卡片网格，封面为主视觉,P0,todo,M2-03,卡片网格封面为主视觉,无前端
+119,M7-02,需求,PX,时间轴视图，按周/月折叠,P0,todo,,时间轴视图按周月折叠,无前端
+120,M7-03,需求,PX,详情页：封面/播放器+摘要+标签,P0,todo,M2-03,详情页封面/播放器+摘要+标签,无前端；播放器形态待定
+121,M7-04,需求,PX,随机漫游,P1,todo,M7-01,随机漫游,P1，无前端
+122,M7-05,需求,PX,每日回顾：每天推 3-5 条,P1,todo,M7-01,每日回顾推 3-5 条,P1，无前端
+123,M7-06,需求,PX,未读清理：滑卡片批量处理,P2,todo,,未读清理滑卡片,P2，无前端
+124,M7-07,需求,PX,详情页底部同标签推荐,P1,todo,M5-03,详情页底部同标签推荐,P1，无前端
+125,M7-08,需求,PX,高亮与批注,P2,todo,,高亮与批注,P2，无前端
+126,M7-09,需求,PX,沉浸式阅读视图,P2,todo,,沉浸式阅读视图,P2，无前端
+127,M7-10,需求,PX,键盘操作,P2,todo,,键盘操作,P2，无前端
+128,M7-11,需求,PX,朗读 TTS,P3,todo,,朗读 TTS,P3，无前端
+129,M7-12,需求,PX,日期视图：年月分栏+热力网格,P0,todo,M7-01,日期视图（年月+热力网格）,P0，无前端
+130,M7-13,需求,PX,阅读进度与滚动位置记忆,P1,todo,,阅读进度与滚动位置记忆,P1，无前端
+131,M8-01,需求,PX,打开原文（新窗口）,P0,todo,,打开原文新窗口,无前端
+132,M8-02,需求,PX,单条分享（链接+摘要）,P2,todo,,单条分享,P2，未实现
+133,M8-03,需求,PX,生成合集 / 清单,P2,todo,,生成合集/清单,P2，未实现
+134,M8-04,需求,PX,全库问答（RAG）,P3,todo,,全库问答 RAG,P3，未实现
+135,M8-05,需求,PX,单条问答,P3,todo,,单条问答,P3，未实现
+136,M8-06,需求,PX,MCP / API 开放给 AI agent,P3,todo,,MCP/API 开放给 agent,P3，未实现
 137,E-41,工程,DOC,施工计划 R3/R5–R9 明细补齐,工程,todo,,第 6 部分「待写」,施工计划 §8
